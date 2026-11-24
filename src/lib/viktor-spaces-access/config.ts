@@ -25,21 +25,12 @@ function getDefaultViktorSpacesEnv(): ViktorSpacesEnv {
   return (runtime.process?.env ?? {}) as ViktorSpacesEnv;
 }
 
-function requireEnvValue(
-  env: ViktorSpacesEnv,
-  name: keyof ViktorSpacesEnv,
-): string {
-  const value = env[name];
-  if (!value) {
-    throw new Error(`Missing required Viktor Spaces env var: ${name}`);
-  }
-  return value;
-}
-
 export function getViktorSpaceAccessMode(
   env: ViktorSpacesEnv = getDefaultViktorSpacesEnv(),
 ): ViktorSpaceAccessMode {
-  const configured = requireEnvValue(env, "VITE_VIKTOR_SPACES_ACCESS_MODE");
+  // Sign-in now runs on the new backend, so the app is always "authenticated" unless an env
+  // explicitly says otherwise. (Missing used to crash the app, e.g. on Vercel without .env.local.)
+  const configured = env.VITE_VIKTOR_SPACES_ACCESS_MODE || "authenticated";
   if (!VALID_ACCESS_MODES.has(configured)) {
     throw new Error(`Invalid VITE_VIKTOR_SPACES_ACCESS_MODE: ${configured}`);
   }
