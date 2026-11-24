@@ -16,7 +16,6 @@ dist-ssr/
 
 # Convex (old backend, kept until every page moves to the new API)
 .convex/
-convex/_generated/
 
 # Tests and reports
 test-results/

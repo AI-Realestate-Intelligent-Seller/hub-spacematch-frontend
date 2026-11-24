@@ -52,6 +52,13 @@ bun run logs:fetch
 
 The `sync` command uses `convex dev --once` which pushes your functions and exits immediately. Use `bun run logs:fetch` to get recent backend logs (console.log, errors, function executions) — it fetches logs and exits after 5 seconds.
 
+### Vercel Builds
+
+Vercel installs from `package-lock.json` with `npm ci` and runs `npm run build` on Node 22.
+The build uses the checked-in bindings in `convex/_generated/`. After changing the Convex
+schema or adding or removing a Convex module, regenerate the bindings with
+`npx convex codegen` in your configured development environment and commit the updated files.
+
 ### Running E2E Tests
 
 To run Playwright e2e tests after building:
