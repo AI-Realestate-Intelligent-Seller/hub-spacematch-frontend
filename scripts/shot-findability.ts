@@ -1,0 +1,22 @@
+import { runTest } from "./auth";
+const dir = "screenshots/findability";
+runTest("shots", async helper => {
+  const { page } = helper;
+  await page.setViewportSize({ width: 390, height: 844 });
+  await helper.goto("/home");
+  await page.evaluate(() => localStorage.setItem("hub-start-hidden", "1"));
+  await helper.goto("/home");
+  await page.getByTestId("moments").waitFor({ timeout: 20000 });
+  await page.waitForTimeout(2500);
+  const y = await page.getByTestId("moments").evaluate(e => e.getBoundingClientRect().top + window.scrollY - 80);
+  await page.evaluate(v => window.scrollTo(0, v), y);
+  await page.waitForTimeout(600);
+  await page.screenshot({ path: `${dir}/s1-home.png` });
+  await helper.goto("/tools"); await page.getByTestId("tools-page").waitFor(); await page.waitForTimeout(800);
+  await page.screenshot({ path: `${dir}/s2-tools.png` });
+  await helper.goto("/do/new-lead"); await page.getByTestId("moment-page").waitFor(); await page.waitForTimeout(800);
+  await page.screenshot({ path: `${dir}/s3-newlead.png` });
+  await helper.goto("/do/market"); await page.getByTestId("moment-page").waitFor(); await page.waitForTimeout(800);
+  await page.screenshot({ path: `${dir}/s4-market.png` });
+  await page.evaluate(() => localStorage.removeItem("hub-start-hidden"));
+});

@@ -1,0 +1,48 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
+*.tsbuildinfo
+.vite/
+
+# Environment variables (.env.example IS committed)
+.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+
+# Convex (old backend, kept until every page moves to the new API)
+.convex/
+convex/_generated/
+
+# Tests and reports
+test-results/
+playwright-report/
+blob-report/
+.e2e/
+coverage/
+tmp/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Package-manager files we don't use (npm + package-lock.json is the lockfile)
+bun.lockb
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local design-tool state
+.impeccable/

@@ -1,0 +1,1415 @@
+diff --git a/convex/crons.ts b/convex/crons.ts
+index b203673..57e43fd 100644
+--- a/convex/crons.ts
++++ b/convex/crons.ts
+@@ -18,15 +18,15 @@ crons.daily("lofty today 4pm", { hourUTC: 21, minuteUTC: 0 }, internal.hubToday.
+ crons.daily("listing web 7am", { hourUTC: 12, minuteUTC: 10 }, internal.listingAds.refreshAllWeb, {});
+ crons.daily("listing web 5pm", { hourUTC: 22, minuteUTC: 10 }, internal.listingAds.refreshAllWeb, {});
+ 
+-// Seller page numbers without typing: Zillow daily report emails (arrive ~7am CT)
+-// and Instagram Reel views. ~8:30am and 1:30pm CT; Reels again ~6:45pm CT.
++// Seller page numbers without typing: Zillow daily report emails (arrive ~7am CT),
++// ~8:30am and 1:30pm CT.
+ crons.daily("zillow reports 830am", { hourUTC: 13, minuteUTC: 30 }, internal.zillow.scan, {});
+ crons.daily("zillow reports 130pm", { hourUTC: 18, minuteUTC: 30 }, internal.zillow.scan, {});
+-crons.daily("reel views 845am", { hourUTC: 13, minuteUTC: 45 }, internal.reels.refresh, {});
+-crons.daily("reel views 645pm", { hourUTC: 23, minuteUTC: 45 }, internal.reels.refresh, {});
+-// YouTube Short views (@spacematchinc uploads): ~8:50am and 6:50pm CT.
+-crons.daily("youtube views 850am", { hourUTC: 13, minuteUTC: 50 }, internal.youtube.refresh, {});
+-crons.daily("youtube views 650pm", { hourUTC: 23, minuteUTC: 50 }, internal.youtube.refresh, {});
++// Reel numbers (Instagram, Facebook, TikTok, YouTube) from the links on each listing: the
++// SpaceMatch Reels API reads them every morning (~7-9am CT); the Hub pulls the new numbers at
++// 10:00 Chicago (both UTC slots run, the action keeps the one that is 10:00 there).
++// Replaces the Instagram/YouTube API refreshes (convex/reels.ts, convex/youtube.ts).
++crons.cron("reels api daily sync", "0 15,16 * * *", internal.reelsApi.dailySync, {});
+ 
+ // Meta Ads + Google Ads campaign numbers on the listing ad cards (~8:20am, 5:20pm CT).
+ crons.daily("paid ads 820am", { hourUTC: 13, minuteUTC: 20 }, internal.paidAds.refresh, {});
+diff --git a/convex/listings.ts b/convex/listings.ts
+index 9430de5..f684e3f 100644
+--- a/convex/listings.ts
++++ b/convex/listings.ts
+@@ -12,6 +12,7 @@ import { LAUNCH_STEPS, LISTING_STATUSES, addressKey, weekOf } from "./launchStep
+ import type { ParsedShowing } from "./showingtimeParse";
+ import { adsSummary, publicAds } from "./listingAds";
+ import { publicSuggestions } from "./suggestions";
++import { publicReels, reelLinksChanged } from "./reelStats";
+ 
+ const LEADER_EMAILS = ["brandon@spacematchinc.com", "sergio.monjane@spacematchinc.com"];
+ const clean = (s: string | undefined | null, max = 500) => (s ?? "").trim().slice(0, max);
+@@ -133,11 +134,10 @@ export const create = authenticatedMutation({
+       createdAt: now,
+       updatedAt: now,
+     });
+-    // Pick up Zillow reports / an Instagram Reel that already mention this address.
++    // Pick up Zillow reports that already mention this address. Reels are linked by the
++    // agent (Weekly numbers → Reels), no longer matched by street name.
+     await ctx.scheduler.runAfter(0, internal.zillow.rollupListing, { listingId: id });
+-    await ctx.scheduler.runAfter(0, internal.reels.refresh, { listingId: id });
+     await ctx.scheduler.runAfter(0, internal.paidAds.refresh, { listingId: id });
+-    await ctx.scheduler.runAfter(0, internal.youtube.refresh, { listingId: id });
+     // Seller → Lofty contact (find by email/phone, else create under the agent).
+     if (sellerEmail || a.sellerPhone) await ctx.scheduler.runAfter(0, internal.lofty.syncListingSeller, { id });
+     // Neighborhood & marketing plan builds by itself for every new listing (~150 credits).
+@@ -207,14 +207,9 @@ export const update = authenticatedMutation({
+     if ((p.addressKey && p.addressKey !== l.addressKey) || (p.liveDate !== undefined && p.liveDate !== l.liveDate)) {
+       await ctx.scheduler.runAfter(0, internal.zillow.rollupListing, { listingId: id });
+     }
+-    if ((p.links && p.links.reel !== l.links?.reel) || (p.addressKey && p.addressKey !== l.addressKey)) {
+-      if (p.links && !p.links.reel && l.reelAuto) await ctx.db.patch(id, { reelAuto: undefined });
+-      await ctx.scheduler.runAfter(0, internal.reels.refresh, { listingId: id });
+-    }
+-    if ((p.links && p.links.youtube !== l.links?.youtube) || (p.addressKey && p.addressKey !== l.addressKey)) {
+-      if (p.links && !p.links.youtube && l.ytAuto) await ctx.db.patch(id, { ytAuto: undefined });
+-      await ctx.scheduler.runAfter(0, internal.youtube.refresh, { listingId: id });
+-    }
++    // Reel links (Instagram, Facebook, TikTok, YouTube): a changed link drops its old
++    // numbers and queues the listing for the Reel worker (convex/reelStats.ts).
++    if (p.links) await reelLinksChanged(ctx, id, l.links, p.links);
+     if ((p.addressKey && p.addressKey !== l.addressKey) || (p.status && p.status !== l.status)) {
+       await ctx.scheduler.runAfter(0, internal.paidAds.refresh, { listingId: id });
+     }
+@@ -311,6 +306,7 @@ export const saveMetrics = authenticatedMutation({
+         links[k] = u || undefined;
+       }
+       await ctx.db.patch(id, { links });
++      await reelLinksChanged(ctx, id, l.links, links);
+     }
+     if (!/^\d{4}-\d{2}-\d{2}$/.test(wk)) throw new Error("Bad week");
+     for (const val of Object.values(n)) if (val !== undefined && (val < 0 || val > 1e7 || !Number.isFinite(val))) throw new Error("Numbers look off");
+@@ -320,6 +316,11 @@ export const saveMetrics = authenticatedMutation({
+     if (auto.includes("zillow")) { n.zillowViews = cur?.zillowViews; n.zillowSaves = cur?.zillowSaves; }
+     if (auto.includes("reel")) n.reelViews = cur?.reelViews;
+     if (auto.includes("youtube")) n.youtubeViews = cur?.youtubeViews;
++    if (auto.includes("tiktok")) n.tiktokViews = cur?.tiktokViews;
++    if (auto.includes("facebook")) n.fbViews = cur?.fbViews;
++    // The weekly form no longer has the social view boxes (numbers come from the Reel
++    // links), so a save without them keeps whatever the week already had.
++    for (const k of ["tiktokViews", "fbViews", "youtubeViews"] as const) if (n[k] === undefined) n[k] = cur?.[k];
+     const row = { ...n, ...(auto.length ? { auto, zillowDays: cur?.zillowDays } : {}), enteredByEmail: me.email, updatedAt: Date.now() };
+     if (cur) await ctx.db.replace(cur._id, { listingId: id, weekOf: wk, ...row });
+     else await ctx.db.insert("listingMetrics", { listingId: id, weekOf: wk, ...row });
+@@ -494,6 +495,8 @@ export const portal = query({
+         reelCheckedAt: l.reelAuto?.checkedAt,
+         youtubeCheckedAt: l.ytAuto?.checkedAt,
+       },
++      // Reels linked on the listing, with numbers read from each public page.
++      reels: await publicReels(ctx, l),
+       suggestions: await publicSuggestions(ctx, l._id),
+       zillowTotals: l.zillowPage ? { views: l.zillowPage.views, saves: l.zillowPage.saves } : undefined,
+       updatedAt: lastActivity,
+diff --git a/convex/reelLinks.ts b/convex/reelLinks.ts
+new file mode 100644
+index 0000000..a1f4d64
+--- /dev/null
++++ b/convex/reelLinks.ts
+@@ -0,0 +1,126 @@
++// Allowlisted Reel links (Instagram, Facebook, TikTok, YouTube). Pure code shared by
++// the Hub backend, the agent form and the seller page. Nothing here fetches a URL:
++// a link is only ever parsed, canonicalised and turned into an embed address on one
++// of the four known hosts. Port of urls.py from the Reels MVP (v0.4).
++
++export const REEL_PLATFORMS = ["instagram", "facebook", "tiktok", "youtube"] as const;
++export type ReelPlatform = (typeof REEL_PLATFORMS)[number];
++
++/** Where each platform's link lives on listings.links (existing fields). */
++export const REEL_LINK_KEY = { instagram: "reel", facebook: "facebook", tiktok: "tiktok", youtube: "youtube" } as const;
++export const REEL_LABEL: Record<ReelPlatform, string> = { instagram: "Instagram", facebook: "Facebook", tiktok: "TikTok", youtube: "YouTube" };
++export const REEL_PLACEHOLDER: Record<ReelPlatform, string> = {
++  instagram: "https://www.instagram.com/reel/…",
++  facebook: "https://www.facebook.com/reel/… or /share/r/…",
++  tiktok: "https://www.tiktok.com/@name/video/… or vt.tiktok.com/…",
++  youtube: "https://www.youtube.com/shorts/…",
++};
++/** listingMetrics field + "auto" tag each platform's view count is mirrored into. */
++export const REEL_METRIC = {
++  instagram: { field: "reelViews", auto: "reel" },
++  facebook: { field: "fbViews", auto: "facebook" },
++  tiktok: { field: "tiktokViews", auto: "tiktok" },
++  youtube: { field: "youtubeViews", auto: "youtube" },
++} as const;
++
++export type ParsedReel = { platform: ReelPlatform; key: string; url: string; embedUrl?: string };
++
++export class InvalidReelUrl extends Error {}
++
++const fbEmbed = (canonical: string) => `https://www.facebook.com/plugins/video.php?href=${encodeURIComponent(canonical)}&show_text=false`;
++
++export function parseReelUrl(value: string): ParsedReel {
++  const raw = (value ?? "").trim();
++  if (!raw || raw.length > 2048) throw new InvalidReelUrl("Paste a Reel link from Instagram, Facebook, TikTok or YouTube");
++  let u: URL;
++  try {
++    u = new URL(raw);
++  } catch {
++    throw new InvalidReelUrl("That doesn't look like a link. It should start with https://");
++  }
++  if (u.protocol !== "https:" || u.port || u.username || u.password) throw new InvalidReelUrl("Reel links must start with https://");
++  const host = u.hostname.toLowerCase();
++  const path = u.pathname.replace(/\/+$/, "");
++
++  if (host === "instagram.com" || host === "www.instagram.com") {
++    const m = path.match(/^(?:\/[\w.]{1,30})?\/(?:reel|reels|p)\/([\w-]{3,64})$/);
++    if (!m) throw new InvalidReelUrl("Use the Reel's own link (instagram.com/reel/…)");
++    return { platform: "instagram", key: m[1], url: `https://www.instagram.com/reel/${m[1]}/`, embedUrl: `https://www.instagram.com/reel/${m[1]}/embed/` };
++  }
++
++  if (host === "facebook.com" || host === "www.facebook.com" || host === "m.facebook.com") {
++    const m = path.match(/^\/reel\/(\d{3,32})$/) ?? path.match(/^\/[^/]+\/(?:reels|videos)\/(\d{3,32})$/);
++    if (m) {
++      const url = `https://www.facebook.com/reel/${m[1]}`;
++      return { platform: "facebook", key: m[1], url, embedUrl: fbEmbed(url) };
++    }
++    if (path === "/watch") {
++      const vid = u.searchParams.get("v") ?? "";
++      if (/^\d{3,32}$/.test(vid)) {
++        const url = `https://www.facebook.com/watch/?v=${vid}`;
++        return { platform: "facebook", key: vid, url, embedUrl: fbEmbed(url) };
++      }
++    }
++    // Share buttons return opaque short links; the worker resolves them to the video id.
++    const s = path.match(/^\/share\/(r|v)\/([\w-]{3,64})$/);
++    if (s) return { platform: "facebook", key: `share:${s[2]}`, url: `https://www.facebook.com/share/${s[1]}/${s[2]}/` };
++    throw new InvalidReelUrl("Use a Facebook Reel or video link (facebook.com/reel/… or /share/r/…)");
++  }
++  if (host === "fb.watch") {
++    const m = path.match(/^\/([\w-]{3,64})$/);
++    if (m) return { platform: "facebook", key: `watch:${m[1]}`, url: `https://fb.watch/${m[1]}/` };
++    throw new InvalidReelUrl("Use a Facebook Reel or video link");
++  }
++
++  if (host === "youtube.com" || host === "www.youtube.com" || host === "m.youtube.com" || host === "youtu.be") {
++    let vid: string | undefined;
++    if (host === "youtu.be") vid = path.match(/^\/([\w-]{11})$/)?.[1];
++    else {
++      vid = path.match(/^\/(?:shorts|live|embed)\/([\w-]{11})$/)?.[1];
++      if (!vid && path === "/watch") {
++        const q = u.searchParams.get("v") ?? "";
++        if (/^[\w-]{11}$/.test(q)) vid = q;
++      }
++    }
++    if (!vid) throw new InvalidReelUrl("Use a YouTube Shorts or video link (youtube.com/shorts/…)");
++    return { platform: "youtube", key: vid, url: `https://www.youtube.com/shorts/${vid}`, embedUrl: `https://www.youtube.com/embed/${vid}` };
++  }
++
++  if (host === "tiktok.com" || host === "www.tiktok.com" || host === "m.tiktok.com" || host === "vt.tiktok.com" || host === "vm.tiktok.com") {
++    const m = path.match(/^\/@([\w.-]{1,40})\/video\/(\d{8,25})$/);
++    if (m) return { platform: "tiktok", key: m[2], url: `https://www.tiktok.com/@${m[1]}/video/${m[2]}`, embedUrl: `https://www.tiktok.com/embed/v2/${m[2]}` };
++    // Share short links redirect to the video; the worker reports the real id.
++    const short = host === "vt.tiktok.com" || host === "vm.tiktok.com";
++    const s = short ? path.match(/^\/([\w-]{5,20})$/) : path.match(/^\/t\/([\w-]{5,20})$/);
++    if (s) return { platform: "tiktok", key: `share:${s[1]}`, url: short ? `https://${host}/${s[1]}/` : `https://www.tiktok.com/t/${s[1]}/` };
++    throw new InvalidReelUrl("Use a TikTok video link (tiktok.com/@name/video/…) or its share link");
++  }
++
++  throw new InvalidReelUrl("Only Instagram, Facebook, TikTok and YouTube links work here");
++}
++
++/** Parse a link pasted into one platform's box; it must belong to that platform. */
++export function parseReelFor(platform: ReelPlatform, value: string): ParsedReel {
++  const p = parseReelUrl(value);
++  if (p.platform !== platform) throw new InvalidReelUrl(`That is a ${REEL_LABEL[p.platform]} link. Paste it in the ${REEL_LABEL[p.platform]} box.`);
++  return p;
++}
++
++/** Same Reel? Compares canonical forms, so tracking params and trailing slashes don't matter. */
++export function sameReel(a?: string, b?: string): boolean {
++  if (!a || !b) return false;
++  if (a === b) return true;
++  try {
++    const pa = parseReelUrl(a);
++    const pb = parseReelUrl(b);
++    return pa.platform === pb.platform && pa.key === pb.key;
++  } catch {
++    return false;
++  }
++}
++
++/** Embed address the seller page may put in an iframe: only the four known players. */
++export function safeEmbedUrl(u?: string): string | undefined {
++  if (!u) return undefined;
++  return /^https:\/\/(www\.instagram\.com\/reel\/[\w-]+\/embed\/|www\.facebook\.com\/plugins\/video\.php\?href=https%3A%2F%2F(www\.facebook\.com|fb\.watch)%2F[\w%.=-]+(&show_text=false)?|www\.youtube\.com\/embed\/[\w-]{11}|www\.tiktok\.com\/embed\/v2\/\d{8,25})$/.test(u) ? u : undefined;
++}
+diff --git a/convex/reelStats.ts b/convex/reelStats.ts
+new file mode 100644
+index 0000000..4500ed8
+--- /dev/null
++++ b/convex/reelStats.ts
+@@ -0,0 +1,135 @@
++// Reel analytics from pasted links (Instagram, Facebook, TikTok, YouTube).
++//
++// The agent pastes one Reel link per platform on the listing. The Hub never opens those
++// pages itself: the SpaceMatch Reels API reads the public counters (convex/reelsApi.ts runs
++// the calls in the background and saves the numbers into reelStats). The agent card and the
++// seller page read only reelStats.
++import { v } from "convex/values";
++import type { Doc, Id } from "./_generated/dataModel";
++import type { MutationCtx, QueryCtx } from "./_generated/server";
++import { authenticatedMutation, authenticatedQuery } from "./functions";
++import { mine } from "./listings";
++import { InvalidReelUrl, REEL_LABEL, REEL_LINK_KEY, REEL_PLATFORMS, type ReelPlatform, parseReelFor, parseReelUrl, safeEmbedUrl, sameReel } from "./reelLinks";
++import { JOB_STALE_MS, startJob } from "./reelsApi";
++
++const linkOf = (l: Pick<Doc<"listings">, "links">, p: ReelPlatform) => l.links?.[REEL_LINK_KEY[p]];
++
++async function statRows(ctx: QueryCtx, listingId: Id<"listings">) {
++  return await ctx.db.query("reelStats").withIndex("by_listing", q => q.eq("listingId", listingId)).collect();
++}
++
++/**
++ * Call after listings.links changed (any mutation). Numbers that belong to a link that
++ * was removed or swapped are dropped, and the listing is queued for a fresh read.
++ */
++export async function reelLinksChanged(ctx: MutationCtx, listingId: Id<"listings">, before: Doc<"listings">["links"], after: Doc<"listings">["links"]) {
++  let changed = false;
++  const rows = await statRows(ctx, listingId);
++  for (const p of REEL_PLATFORMS) {
++    const a = before?.[REEL_LINK_KEY[p]];
++    const b = after?.[REEL_LINK_KEY[p]];
++    if ((a ?? "") === (b ?? "") || sameReel(a, b)) continue;
++    changed = true;
++    for (const r of rows) if (r.platform === p) await ctx.db.delete(r._id);
++  }
++  // New/changed links → create or update the Reels property; all removed → archive it.
++  if (changed) await startJob(ctx, listingId, "links", "link");
++  return changed;
++}
++
++// ---------- Agent side ----------
++
++export const forListing = authenticatedQuery({
++  args: { id: v.id("listings") },
++  handler: async (ctx, { id }) => {
++    const { l } = await mine(ctx, ctx.userId, id);
++    const rows = await statRows(ctx, id);
++    const s = await ctx.db.query("reelsApi").withIndex("by_listing", q => q.eq("listingId", id)).first();
++    const job = s?.job && Date.now() - s.job.since < JOB_STALE_MS ? s.job : null;
++    return {
++      platforms: REEL_PLATFORMS.map(p => {
++        const link = linkOf(l, p) ?? "";
++        const r = rows.find(x => x.platform === p && sameReel(x.url, link));
++        return {
++          platform: p,
++          link,
++          stat: r ? { views: r.views, likes: r.likes, comments: r.comments, shares: r.shares, checkedAt: r.checkedAt, okAt: r.okAt, error: r.error, detail: r.detail } : null,
++        };
++      }),
++      queued: job ? { requestedAt: job.since, by: job.by, kind: job.kind } : null,
++      error: s?.error ?? null,
++      cooldownUntil: s?.cooldownUntil && s.cooldownUntil > Date.now() ? s.cooldownUntil : null,
++      lastRefreshStatus: s?.lastRefreshStatus ?? null,
++    };
++  },
++});
++
++export const saveLinks = authenticatedMutation({
++  args: { id: v.id("listings"), instagram: v.string(), facebook: v.string(), tiktok: v.string(), youtube: v.string() },
++  handler: async (ctx, { id, ...input }) => {
++    const { l } = await mine(ctx, ctx.userId, id);
++    const links = { ...(l.links ?? {}) };
++    for (const p of REEL_PLATFORMS) {
++      const raw = input[p].trim();
++      if (!raw) {
++        links[REEL_LINK_KEY[p]] = undefined;
++        continue;
++      }
++      try {
++        links[REEL_LINK_KEY[p]] = parseReelFor(p, raw).url;
++      } catch (e) {
++        throw new Error(e instanceof InvalidReelUrl ? e.message : "That link didn't work");
++      }
++    }
++    // One video per listing (the Reels service refuses the same video on two properties).
++    const others = (await ctx.db.query("listings").collect()).filter(o => o._id !== id);
++    for (const p of REEL_PLATFORMS) {
++      const mineLink = links[REEL_LINK_KEY[p]];
++      if (!mineLink || sameReel(mineLink, linkOf(l, p))) continue;
++      const dup = others.find(o => REEL_PLATFORMS.some(q => sameReel(mineLink, linkOf(o, q))));
++      if (dup) throw new Error(`${REEL_LABEL[p]}: this video is already linked to ${dup.address}. Remove it there first.`);
++    }
++    await ctx.db.patch(id, { links, updatedAt: Date.now() });
++    const changed = await reelLinksChanged(ctx, id, l.links, links);
++    return { changed };
++  },
++});
++
++export const requestRefresh = authenticatedMutation({
++  args: { id: v.id("listings") },
++  handler: async (ctx, { id }) => {
++    const { me, l } = await mine(ctx, ctx.userId, id);
++    if (!REEL_PLATFORMS.some(p => linkOf(l, p))) throw new Error("Add a Reel link first");
++    const s = await ctx.db.query("reelsApi").withIndex("by_listing", q => q.eq("listingId", id)).first();
++    if (s?.cooldownUntil && s.cooldownUntil > Date.now()) throw new Error(`Refreshed a few minutes ago. Try again in ${Math.ceil((s.cooldownUntil - Date.now()) / 60000)} min.`);
++    return { requestedAt: await startJob(ctx, id, "refresh", me.email) };
++  },
++});
++
++// ---------- Seller side (called from listings.portal) ----------
++
++export async function publicReels(ctx: QueryCtx, l: Doc<"listings">) {
++  const rows = await statRows(ctx, l._id);
++  return REEL_PLATFORMS.flatMap(p => {
++    const link = linkOf(l, p);
++    if (!link) return [];
++    let parsed: ReturnType<typeof parseReelUrl> | null = null;
++    try {
++      parsed = parseReelUrl(link);
++    } catch {
++      return []; // an old free-form link that is not a Reel: nothing to embed or count
++    }
++    if (parsed.platform !== p) return [];
++    const r = rows.find(x => x.platform === p && sameReel(x.url, link));
++    return [{
++      platform: p,
++      url: parsed.url,
++      embedUrl: safeEmbedUrl(r?.embedUrl) ?? safeEmbedUrl(parsed.embedUrl),
++      views: r?.views,
++      likes: r?.likes,
++      comments: r?.comments,
++      shares: r?.shares,
++      checkedAt: r?.okAt,
++    }];
++  });
++}
+diff --git a/convex/reelsApi.ts b/convex/reelsApi.ts
+new file mode 100644
+index 0000000..fefbadd
+--- /dev/null
++++ b/convex/reelsApi.ts
+@@ -0,0 +1,461 @@
++// Reel numbers from the SpaceMatch Reels API (Haseeb's service, contract HUB_INTEGRATION.md 2026-11-23).
++//
++// The Hub keeps one Reels "property" per listing (table reelsApi) with the listing's Reel links
++// (one per platform, stored on listings.links as before). The API reads the public counters
++// inside the request, so every call that reads links runs here, in a scheduled background
++// action with a 300 s timeout; the agent's card shows "Reading…" meanwhile. Results land in
++// reelStats (agent card + seller page read only that table, never the API).
++//
++// Env (server only, never sent to the browser): REELS_API_URL (…/v1), REELS_API_KEY.
++import { v } from "convex/values";
++import { internal } from "./_generated/api";
++import type { Doc, Id } from "./_generated/dataModel";
++import { type ActionCtx, internalAction, internalMutation, internalQuery, type MutationCtx } from "./_generated/server";
++import { weekOf } from "./launchSteps";
++import { REEL_LINK_KEY, REEL_METRIC, REEL_PLATFORMS, type ReelPlatform, parseReelUrl, safeEmbedUrl, sameReel } from "./reelLinks";
++
++export const LIVE = ["Preparing", "Coming soon", "Active", "Under contract"];
++/** A job older than this is treated as dead (a Convex action stops at 10 minutes). */
++export const JOB_STALE_MS = 11 * 60_000;
++const LONG = 300_000;
++const SHORT = 15_000;
++
++const isPlatform = (p: string): p is ReelPlatform => (REEL_PLATFORMS as readonly string[]).includes(p);
++const linkOf = (l: Pick<Doc<"listings">, "links">, p: ReelPlatform) => l.links?.[REEL_LINK_KEY[p]];
++const isReelFor = (p: ReelPlatform, url?: string) => {
++  if (!url) return false;
++  try {
++    return parseReelUrl(url).platform === p;
++  } catch {
++    return false;
++  }
++};
++
++// ---------- HTTP client ----------
++
++export class ReelsApiError extends Error {
++  status: number;
++  code: string;
++  field: string | null;
++  requestId: string | null;
++  retryAfter: number | null;
++  constructor(status: number, code: string, message: string, field: string | null = null, requestId: string | null = null, retryAfter: number | null = null) {
++    super(message);
++    this.status = status;
++    this.code = code;
++    this.field = field;
++    this.requestId = requestId;
++    this.retryAfter = retryAfter;
++  }
++}
++
++type CallOpts = { body?: unknown; idemKey?: string; timeoutMs?: number; query?: Record<string, string> };
++
++async function call<T>(method: string, path: string, o: CallOpts = {}): Promise<{ status: number; data: T }> {
++  const base = (process.env.REELS_API_URL ?? "").replace(/\/+$/, "");
++  const key = process.env.REELS_API_KEY ?? "";
++  if (!base || !key) throw new ReelsApiError(0, "not_configured", "The Reels service isn't set up on this Hub yet (REELS_API_URL / REELS_API_KEY).");
++  const qs = o.query ? `?${new URLSearchParams(o.query).toString()}` : "";
++  const requestId = `hub_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
++  let last: ReelsApiError | null = null;
++  for (let attempt = 1; attempt <= 3; attempt++) {
++    const ctrl = new AbortController();
++    const timer = setTimeout(() => ctrl.abort(), o.timeoutMs ?? SHORT);
++    let res: Response;
++    try {
++      res = await fetch(`${base}${path}${qs}`, {
++        method,
++        headers: {
++          Authorization: `Bearer ${key}`,
++          Accept: "application/json",
++          "X-Request-Id": requestId,
++          ...(o.body !== undefined ? { "Content-Type": "application/json" } : {}),
++          ...(o.idemKey ? { "Idempotency-Key": o.idemKey } : {}),
++        },
++        body: o.body !== undefined ? JSON.stringify(o.body) : undefined,
++        signal: ctrl.signal,
++      });
++    } catch (e) {
++      clearTimeout(timer);
++      const timedOut = e instanceof Error && e.name === "AbortError";
++      last = new ReelsApiError(0, timedOut ? "timeout" : "network", timedOut ? "The Reels service took too long to answer" : "Couldn't reach the Reels service", null, requestId);
++      if (attempt < 3) await new Promise(r => setTimeout(r, 2000 * attempt));
++      continue;
++    }
++    clearTimeout(timer);
++    if (res.status === 204) return { status: 204, data: null as T };
++    const text = await res.text();
++    let json: any = null;
++    try {
++      json = text ? JSON.parse(text) : null;
++    } catch {
++      json = null;
++    }
++    if (res.ok) return { status: res.status, data: json as T };
++    const err = json?.error ?? {};
++    const retryAfter = Number(res.headers.get("retry-after")) || null;
++    last = new ReelsApiError(res.status, err.code ?? `http_${res.status}`, err.message ?? `Reels service error (HTTP ${res.status})`, err.field ?? null, res.headers.get("x-request-id") ?? requestId, retryAfter);
++    // Retry only network errors and 5xx. 429 here is the per-property refresh cooldown: tell the agent instead.
++    if (res.status < 500) break;
++    if (attempt < 3) await new Promise(r => setTimeout(r, 2000 * attempt));
++  }
++  if (last?.status === 401) console.error("REELS API 401: REELS_API_KEY missing, revoked or wrong", JSON.stringify({ requestId: last.requestId }));
++  else console.warn("reels api error", JSON.stringify({ method, path, status: last?.status, code: last?.code, requestId: last?.requestId }));
++  throw last ?? new ReelsApiError(0, "unknown", "Reels service error");
++}
++
++type ApiRefresh = { id: string; status: string; links?: { platform: string; status: string }[] };
++type ApiReel = {
++  link_id: string; platform: string; url: string; canonical_url?: string; embed_url?: string | null;
++  views: number | null; likes: number | null; comments: number | null; shares: number | null;
++  checked_at: string | null; ok_at: string | null; source?: string | null; source_detail?: string | null;
++  error: { code: string; message: string } | null;
++};
++type ApiAnalytics = { property_id: string; reels: ApiReel[]; last_refresh?: unknown };
++
++const FINAL = ["done", "partial", "failed", "cancelled"];
++
++/** A refresh came back `running` (the request hit its time budget): each GET reads more links. Max 3 calls. */
++async function finishRefresh(r: ApiRefresh | null | undefined) {
++  let cur = r;
++  for (let i = 0; cur && !FINAL.includes(cur.status) && i < 3; i++) {
++    cur = (await call<ApiRefresh>("GET", `/refreshes/${cur.id}`, { timeoutMs: LONG })).data;
++  }
++  return cur ?? null;
++}
++
++// ---------- State (one row per listing) ----------
++
++type LoadResult = {
++  listing: { address: string; status: string; links: { platform: ReelPlatform; url: string }[] } | null;
++  state: Doc<"reelsApi"> | null;
++};
++type SyncStateResult = {
++  lastSyncAt: number | null;
++  states: { listingId: Id<"listings">; propertyId: string | null; archived: boolean; address: string | null; listing: { address: string; live: boolean; hasLinks: boolean } | null }[];
++  missing: Id<"listings">[];
++};
++
++export const load = internalQuery({
++  args: { listingId: v.id("listings") },
++  handler: async (ctx, { listingId }): Promise<LoadResult> => {
++    const l = await ctx.db.get(listingId);
++    const s = await ctx.db.query("reelsApi").withIndex("by_listing", q => q.eq("listingId", listingId)).first();
++    if (!l) return { listing: null, state: s };
++    const links = REEL_PLATFORMS.flatMap(p => {
++      const url = linkOf(l, p);
++      if (!url) return [];
++      try {
++        const parsed = parseReelUrl(url);
++        return parsed.platform === p ? [{ platform: p, url: parsed.url }] : [];
++      } catch {
++        return []; // old free-form text that isn't a Reel link: never sent
++      }
++    });
++    return { listing: { address: l.address, status: l.status, links }, state: s };
++  },
++});
++
++export const patchState = internalMutation({
++  args: {
++    listingId: v.id("listings"),
++    set: v.object({
++      propertyId: v.optional(v.string()),
++      address: v.optional(v.string()),
++      archived: v.optional(v.boolean()),
++      createKey: v.optional(v.union(v.string(), v.null())),
++      error: v.optional(v.union(v.object({ message: v.string(), platform: v.optional(v.string()), code: v.optional(v.string()) }), v.null())),
++      cooldownUntil: v.optional(v.union(v.number(), v.null())),
++      lastRefreshId: v.optional(v.string()),
++      lastRefreshStatus: v.optional(v.string()),
++      syncedAt: v.optional(v.number()),
++    }),
++    finishToken: v.optional(v.string()),
++  },
++  handler: async (ctx, { listingId, set, finishToken }) => {
++    const s = await ctx.db.query("reelsApi").withIndex("by_listing", q => q.eq("listingId", listingId)).first();
++    const patch: Record<string, unknown> = { updatedAt: Date.now() };
++    for (const [k, val] of Object.entries(set)) if (val !== undefined) patch[k] = val === null ? undefined : val;
++    if (finishToken && s?.job?.token === finishToken) patch.job = undefined;
++    if (s) await ctx.db.patch(s._id, patch);
++    else await ctx.db.insert("reelsApi", { listingId, ...(patch as { updatedAt: number }) });
++    return null;
++  },
++});
++
++/**
++ * Start a background job for a listing: "links" after the links changed, "refresh" for
++ * Refresh now. One job at a time per listing; a new "links" job replaces the token so the
++ * older run's finish doesn't clear the newer one's "Reading…" state.
++ */
++export async function startJob(ctx: MutationCtx, listingId: Id<"listings">, kind: "links" | "refresh", by: string) {
++  const s = await ctx.db.query("reelsApi").withIndex("by_listing", q => q.eq("listingId", listingId)).first();
++  const now = Date.now();
++  const running = s?.job && now - s.job.since < JOB_STALE_MS ? s.job : null;
++  if (running && kind === "refresh") return running.since;
++  const token = crypto.randomUUID();
++  const job = { kind, by, since: now, token };
++  const createKey = s?.propertyId ? s.createKey : (s?.createKey ?? crypto.randomUUID());
++  if (s) await ctx.db.patch(s._id, { job, createKey, error: kind === "links" ? undefined : s.error, updatedAt: now });
++  else await ctx.db.insert("reelsApi", { listingId, job, createKey, updatedAt: now });
++  await ctx.scheduler.runAfter(0, internal.reelsApi.run, { listingId, kind, by, token, idemKey: crypto.randomUUID() });
++  return now;
++}
++
++// ---------- The job ----------
++
++export const run = internalAction({
++  args: { listingId: v.id("listings"), kind: v.union(v.literal("links"), v.literal("refresh")), by: v.string(), token: v.string(), idemKey: v.string() },
++  handler: async (ctx, a): Promise<Record<string, unknown>> => {
++    let out: Record<string, unknown> = {};
++    const started = Date.now();
++    try {
++      out = await runJob(ctx, a);
++      // The service allows one manual refresh per property every 10 minutes: show the countdown right away.
++      const cooldown = a.kind === "refresh" ? { cooldownUntil: started + 600_000 } : {};
++      await ctx.runMutation(internal.reelsApi.patchState, { listingId: a.listingId, set: { error: null, ...cooldown }, finishToken: a.token });
++    } catch (e) {
++      const err = e instanceof ReelsApiError ? e : new ReelsApiError(0, "internal", e instanceof Error ? e.message : "Something went wrong");
++      const { listing }: LoadResult = await ctx.runQuery(internal.reelsApi.load, { listingId: a.listingId });
++      const idx = err.field?.match(/^links\[(\d+)\]$/)?.[1];
++      const platform = idx !== undefined ? listing?.links[Number(idx)]?.platform : undefined;
++      const message = err.status === 429
++        ? `Refreshed a few minutes ago. You can refresh again in ${Math.max(1, Math.ceil((err.retryAfter ?? 600) / 60))} min.`
++        : err.status === 401 ? "The Reels service rejected the Hub's key. Ops has been alerted." : err.message;
++      await ctx.runMutation(internal.reelsApi.patchState, {
++        listingId: a.listingId,
++        set: { error: { message: message.slice(0, 300), platform, code: err.code }, ...(err.status === 429 ? { cooldownUntil: Date.now() + (err.retryAfter ?? 600) * 1000 } : {}) },
++        finishToken: a.token,
++      });
++      out = { error: err.code, status: err.status, requestId: err.requestId };
++    }
++    console.log("reels api job", JSON.stringify({ listingId: a.listingId, kind: a.kind, ...out }));
++    return out;
++  },
++});
++
++async function runJob(ctx: ActionCtx, a: { listingId: Id<"listings">; kind: "links" | "refresh"; by: string; idemKey: string }): Promise<Record<string, unknown>> {
++  const { listing, state }: LoadResult = await ctx.runQuery(internal.reelsApi.load, { listingId: a.listingId });
++  if (!listing) return { skipped: "listing gone" };
++  const urls = listing.links.map(x => x.url);
++  let propertyId = state?.propertyId;
++  const set = (s: Record<string, unknown>) => patch(ctx, a.listingId, s);
++
++  // No links left: archive (keeps history; re-adding a link unarchives).
++  if (!urls.length) {
++    if (propertyId && !state?.archived) {
++      await call("POST", `/properties/${propertyId}/archive`);
++      await set({ archived: true });
++    }
++    return { archived: !!propertyId };
++  }
++
++  let refresh: ApiRefresh | null = null;
++  if (!propertyId) {
++    const r = await call<{ id: string; refresh: ApiRefresh | null }>("POST", "/properties", { body: { address: listing.address, links: urls }, idemKey: state?.createKey ?? a.idemKey, timeoutMs: LONG });
++    propertyId = r.data.id;
++    await set({ propertyId, address: listing.address, archived: false, createKey: null });
++    refresh = r.data.refresh;
++  } else {
++    if (state?.archived) {
++      await call("POST", `/properties/${propertyId}/unarchive`);
++      await set({ archived: false });
++    }
++    if (state?.address !== listing.address) {
++      await call("PATCH", `/properties/${propertyId}`, { body: { address: listing.address } });
++      await set({ address: listing.address });
++    }
++    if (a.kind === "links") {
++      const r = await call<{ refresh: ApiRefresh | null }>("PUT", `/properties/${propertyId}/links`, { body: { links: urls }, timeoutMs: LONG });
++      refresh = r.data.refresh;
++    } else {
++      const r = await call<{ refresh: ApiRefresh }>("POST", `/properties/${propertyId}/refresh`, { body: { requested_by: a.by }, idemKey: a.idemKey, timeoutMs: LONG });
++      refresh = r.data.refresh;
++    }
++  }
++  const fin = await finishRefresh(refresh);
++  if (fin) await set({ lastRefreshId: fin.id, lastRefreshStatus: fin.status });
++  const an = (await call<ApiAnalytics>("GET", `/properties/${propertyId}/analytics`)).data;
++  const saved: { saved: number } = await ctx.runMutation(internal.reelsApi.applyAnalytics, { listingId: a.listingId, reels: an.reels });
++  return { propertyId, refresh: fin?.status ?? null, ...saved };
++}
++
++const patch = (ctx: ActionCtx, listingId: Id<"listings">, set: Record<string, unknown>) =>
++  ctx.runMutation(internal.reelsApi.patchState, { listingId, set: set as never });
++
++// ---------- Saving numbers (reelStats is what the agent card and seller page read) ----------
++
++const FRIENDLY_ERROR: Record<string, string> = {
++  upstream_blocked: "The platform didn't show the numbers this time.",
++  not_found: "This video is no longer available. Please replace the link.",
++  invalid_link: "This video is no longer available. Please replace the link.",
++};
++
++export const applyAnalytics = internalMutation({
++  args: { listingId: v.id("listings"), reels: v.array(v.any()) },
++  handler: async (ctx, { listingId, reels }): Promise<{ saved: number }> => {
++    const l = await ctx.db.get(listingId);
++    if (!l) return { saved: 0 };
++    const now = Date.now();
++    const rows = await ctx.db.query("reelStats").withIndex("by_listing", q => q.eq("listingId", listingId)).collect();
++    let saved = 0;
++    for (const raw of reels) {
++      const r = raw as ApiReel;
++      if (!isPlatform(r.platform)) continue;
++      const link = linkOf(l, r.platform);
++      // Only numbers for the link the listing has now (the agent may have swapped it meanwhile).
++      if (!link || !(sameReel(link, r.url) || sameReel(link, r.canonical_url))) continue;
++      let parsed: ReturnType<typeof parseReelUrl>;
++      try {
++        parsed = parseReelUrl(link);
++      } catch {
++        continue;
++      }
++      const okAt = r.ok_at ? Date.parse(r.ok_at) : undefined;
++      const checkedAt = r.checked_at ? Date.parse(r.checked_at) : (okAt ?? now);
++      const n = (x: number | null) => (typeof x === "number" && Number.isFinite(x) && x >= 0 ? Math.round(x) : undefined);
++      const nums = { views: n(r.views), likes: n(r.likes), comments: n(r.comments), shares: n(r.shares) };
++      const cur = rows.find(x => x.platform === r.platform);
++      const row = {
++        listingId, platform: r.platform, url: parsed.url, key: parsed.key,
++        embedUrl: safeEmbedUrl(r.embed_url ?? undefined) ?? safeEmbedUrl(parsed.embedUrl) ?? cur?.embedUrl,
++        ...(okAt ? nums : {}),
++        detail: r.source_detail?.slice(0, 300) ?? undefined,
++        error: r.error ? (FRIENDLY_ERROR[r.error.code] ?? "Couldn't update just now.") : undefined,
++        checkedAt, okAt,
++      };
++      if (cur) await ctx.db.replace(cur._id, row);
++      else await ctx.db.insert("reelStats", row);
++      saved++;
++      // A new successful read: keep history and mirror views into this week's numbers.
++      if (okAt && okAt !== cur?.okAt) {
++        await ctx.db.insert("reelSnapshots", { listingId, platform: r.platform, url: parsed.url, ...nums, at: okAt });
++        if (nums.views !== undefined) {
++          const { field, auto: tag } = REEL_METRIC[r.platform];
++          const wk = weekOf(okAt);
++          const m = await ctx.db.query("listingMetrics").withIndex("by_listing_week", q => q.eq("listingId", listingId).eq("weekOf", wk)).first();
++          const auto = Array.from(new Set([...(m?.auto ?? []), tag]));
++          if (m) await ctx.db.patch(m._id, { [field]: nums.views, auto, updatedAt: now });
++          else await ctx.db.insert("listingMetrics", { listingId, weekOf: wk, [field]: nums.views, auto, enteredByEmail: "auto", updatedAt: now });
++        }
++      }
++    }
++    const s = await ctx.db.query("reelsApi").withIndex("by_listing", q => q.eq("listingId", listingId)).first();
++    if (s) await ctx.db.patch(s._id, { syncedAt: now });
++    return { saved };
++  },
++});
++
++// ---------- Daily sync (10:00 America/Chicago) ----------
++
++export const syncState = internalQuery({
++  args: {},
++  handler: async (ctx): Promise<SyncStateResult> => {
++    const meta = await ctx.db.query("reelsApiSync").withIndex("by_name", q => q.eq("name", "daily")).first();
++    const states = await ctx.db.query("reelsApi").collect();
++    const out = [];
++    for (const s of states) {
++      const l = await ctx.db.get(s.listingId);
++      out.push({
++        listingId: s.listingId, propertyId: s.propertyId ?? null, archived: !!s.archived, address: s.address ?? null,
++        listing: l ? { address: l.address, live: LIVE.includes(l.status), hasLinks: REEL_PLATFORMS.some(p => linkOf(l, p)) } : null,
++      });
++    }
++    // Live listings with Reel links that the Reels service doesn't know yet (links pasted before this integration).
++    const known = new Set(states.filter(s => s.propertyId).map(s => s.listingId));
++    const missing = (await ctx.db.query("listings").collect())
++      .filter(l => !known.has(l._id) && LIVE.includes(l.status) && REEL_PLATFORMS.some(p => isReelFor(p, linkOf(l, p))))
++      .map(l => l._id);
++    return { lastSyncAt: meta?.lastSyncAt ?? null, states: out, missing };
++  },
++});
++
++export const setLastSync = internalMutation({
++  args: { at: v.number() },
++  handler: async (ctx, { at }) => {
++    const meta = await ctx.db.query("reelsApiSync").withIndex("by_name", q => q.eq("name", "daily")).first();
++    if (meta) await ctx.db.patch(meta._id, { lastSyncAt: at });
++    else await ctx.db.insert("reelsApiSync", { name: "daily", lastSyncAt: at });
++    return null;
++  },
++});
++
++/** Start a job without a signed-in agent (daily sync, ops, tests). */
++export const startJobInternal = internalMutation({
++  args: { listingId: v.id("listings"), by: v.string(), kind: v.optional(v.union(v.literal("links"), v.literal("refresh"))) },
++  handler: async (ctx, { listingId, by, kind }): Promise<{ since: number }> => ({ since: await startJob(ctx, listingId, kind ?? "links", by) }),
++});
++
++export const clearProperty = internalMutation({
++  args: { listingId: v.id("listings") },
++  handler: async (ctx, { listingId }) => {
++    const s = await ctx.db.query("reelsApi").withIndex("by_listing", q => q.eq("listingId", listingId)).first();
++    if (s) await ctx.db.delete(s._id);
++    return null;
++  },
++});
++
++const chicagoHour = (t: number) => Number(new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", hour: "numeric", hourCycle: "h23" }).format(t));
++
++/** Cron at 15:00 and 16:00 UTC; runs only in the one that is 10:00 in Chicago (follows daylight saving). */
++export const dailySync = internalAction({
++  args: { force: v.optional(v.boolean()) },
++  handler: async (ctx, { force }): Promise<Record<string, unknown>> => {
++    const started = Date.now();
++    if (!force && chicagoHour(started) !== 10) return { skipped: "not 10:00 in Chicago" };
++    const st: SyncStateResult = await ctx.runQuery(internal.reelsApi.syncState, {});
++    const byProperty = new Map(st.states.filter(s => s.propertyId).map(s => [s.propertyId as string, s]));
++    const since = new Date(st.lastSyncAt ?? started - 48 * 3600_000).toISOString().replace(/\.\d{3}Z$/, "Z");
++    let items = 0;
++    let saved = 0;
++    let cursor: string | null = null;
++    for (let page = 0; page < 50; page++) {
++      const r: { data: { items: ApiAnalytics[]; next_cursor: string | null } } = await call("GET", "/analytics", { query: { updated_since: since, limit: "200", ...(cursor ? { cursor } : {}) } });
++      for (const it of r.data.items) {
++        items++;
++        const s = byProperty.get(it.property_id);
++        if (!s?.listing) continue;
++        const r2: { saved: number } = await ctx.runMutation(internal.reelsApi.applyAnalytics, { listingId: s.listingId, reels: it.reels });
++        saved += r2.saved;
++      }
++      cursor = r.data.next_cursor;
++      if (!cursor) break;
++    }
++    // Housekeeping: sold/withdrawn → archive; back on market → unarchive; deleted listing → delete; new address → PATCH.
++    const ops: string[] = [];
++    for (const s of st.states) {
++      if (!s.propertyId) continue;
++      try {
++        if (!s.listing) {
++          await call("DELETE", `/properties/${s.propertyId}`, { query: { hard: "true" } });
++          await ctx.runMutation(internal.reelsApi.clearProperty, { listingId: s.listingId });
++          ops.push(`delete ${s.propertyId}`);
++          continue;
++        }
++        if (!s.listing.live && !s.archived) {
++          await call("POST", `/properties/${s.propertyId}/archive`);
++          await patch(ctx, s.listingId, { archived: true });
++          ops.push(`archive ${s.propertyId}`);
++        } else if (s.listing.live && s.archived && s.listing.hasLinks) {
++          await call("POST", `/properties/${s.propertyId}/unarchive`);
++          await patch(ctx, s.listingId, { archived: false });
++          ops.push(`unarchive ${s.propertyId}`);
++        }
++        if (s.listing.address !== s.address) {
++          await call("PATCH", `/properties/${s.propertyId}`, { body: { address: s.listing.address } });
++          await patch(ctx, s.listingId, { address: s.listing.address });
++          ops.push(`address ${s.propertyId}`);
++        }
++      } catch (e) {
++        ops.push(`failed ${s.propertyId}: ${e instanceof Error ? e.message : e}`);
++      }
++    }
++    for (const id of st.missing.slice(0, 25)) {
++      await ctx.runMutation(internal.reelsApi.startJobInternal, { listingId: id, by: "daily" });
++      ops.push(`create ${id}`);
++    }
++    await ctx.runMutation(internal.reelsApi.setLastSync, { at: started });
++    console.log("reels api daily sync", JSON.stringify({ since, items, saved, ops }));
++    return { since, items, saved, ops };
++  },
++});
+diff --git a/convex/schema.ts b/convex/schema.ts
+index 0c7d46d..f4f1312 100644
+--- a/convex/schema.ts
++++ b/convex/schema.ts
+@@ -314,6 +314,60 @@ const schema = defineSchema({
+     .index("by_mls", ["mlsNumber"])
+     .index("by_addressKey", ["addressKey"]),
+ 
++  // Reel numbers per listing and platform (Instagram, Facebook, TikTok, YouTube). The link
++  // itself stays on listings.links; a worker outside the Hub opens the public page in a
++  // logged-out browser and posts the counters here (convex/reelStats.ts).
++  reelStats: defineTable({
++    listingId: v.id("listings"),
++    platform: v.string(), // "instagram" | "facebook" | "tiktok" | "youtube"
++    url: v.string(), // canonical link the numbers belong to
++    key: v.string(),
++    embedUrl: v.optional(v.string()),
++    views: v.optional(v.number()), // undefined = not shown publicly (N/A), never a guess
++    likes: v.optional(v.number()),
++    comments: v.optional(v.number()),
++    shares: v.optional(v.number()),
++    detail: v.optional(v.string()), // where the numbers were read
++    error: v.optional(v.string()), // last check failed; numbers above are the last good ones
++    checkedAt: v.number(),
++    okAt: v.optional(v.number()),
++  }).index("by_listing", ["listingId"]),
++  // One row per successful check, for history.
++  reelSnapshots: defineTable({
++    listingId: v.id("listings"),
++    platform: v.string(),
++    url: v.string(),
++    views: v.optional(v.number()),
++    likes: v.optional(v.number()),
++    comments: v.optional(v.number()),
++    shares: v.optional(v.number()),
++    at: v.number(),
++  }).index("by_listing_platform", ["listingId", "platform", "at"]),
++  // Legacy (Playwright worker era, before 2026-11-23): no longer written; kept so old rows still validate.
++  reelRefreshQueue: defineTable({
++    listingId: v.id("listings"),
++    requestedAt: v.number(),
++    by: v.string(), // agent email | "daily" | "link"
++  }).index("by_listing", ["listingId"]).index("by_requestedAt", ["requestedAt"]),
++
++  // One SpaceMatch Reels API "property" per listing (convex/reelsApi.ts): its id, the address
++  // last sent, archive state, the running background job and the last error shown on the card.
++  reelsApi: defineTable({
++    listingId: v.id("listings"),
++    propertyId: v.optional(v.string()),
++    address: v.optional(v.string()),
++    archived: v.optional(v.boolean()),
++    createKey: v.optional(v.string()), // Idempotency-Key reused until the create succeeds
++    job: v.optional(v.object({ kind: v.string(), by: v.string(), since: v.number(), token: v.string() })),
++    error: v.optional(v.object({ message: v.string(), platform: v.optional(v.string()), code: v.optional(v.string()) })),
++    cooldownUntil: v.optional(v.number()), // Refresh now is rate limited (429 Retry-After)
++    lastRefreshId: v.optional(v.string()),
++    lastRefreshStatus: v.optional(v.string()),
++    syncedAt: v.optional(v.number()),
++    updatedAt: v.number(),
++  }).index("by_listing", ["listingId"]).index("by_property", ["propertyId"]),
++  reelsApiSync: defineTable({ name: v.string(), lastSyncAt: v.number() }).index("by_name", ["name"]),
++
+   // Weekly numbers the agent enters (Zillow + MLS have no feed).
+   listingMetrics: defineTable({
+     listingId: v.id("listings"),
+@@ -330,7 +384,7 @@ const schema = defineSchema({
+     tiktokViews: v.optional(v.number()),
+     fbViews: v.optional(v.number()),
+     youtubeViews: v.optional(v.number()),
+-    auto: v.optional(v.array(v.string())), // fields filled by code: "zillow" | "reel"
++    auto: v.optional(v.array(v.string())), // fields filled by code: "zillow" | "reel" | "youtube" | "tiktok" | "facebook"
+     zillowDays: v.optional(v.number()), // days of Zillow reports summed into this week
+     enteredByEmail: v.string(), // "auto" when only code has written the row
+     updatedAt: v.number(),
+diff --git a/scripts/test-reel-stats.ts b/scripts/test-reel-stats.ts
+new file mode 100644
+index 0000000..7d061c0
+--- /dev/null
++++ b/scripts/test-reel-stats.ts
+@@ -0,0 +1,105 @@
++// Reel links → SpaceMatch Reels API (background job) → numbers on the agent card and the seller page.
++// Uses the dev demo listing "1620 N Hoyne Ave" (m571sp80…), which is linked to the Reels API test
++// property prop_cee1b388b2324f2fbb0a. Refresh now calls the real API (dev key), 1-3 minutes.
++import { runTest } from "./auth";
++
++const DEMO = "m571sp80ckh0dr3dd3ymcv0xfs8j180n";
++const SELLER = "6h7MBFhWAQTMjdJWJcurMhrg";
++const LINKS = {
++  Instagram: "https://www.instagram.com/reel/DTOz5t5jLQH/",
++  TikTok: "https://vt.tiktok.com/ZSpaGf8Yp/",
++};
++
++async function numbers(page: import("playwright").Page) {
++  const got: Record<string, string> = {};
++  for (const p of ["instagram", "facebook", "tiktok", "youtube"]) {
++    for (const k of ["views", "likes", "comments", "shares"]) {
++      const el = page.getByTestId(`reel-${p}-${k}`);
++      got[`${p}.${k}`] = (await el.count()) ? ((await el.textContent()) ?? "").trim() : "(no numbers)";
++    }
++  }
++  return got;
++}
++
++runTest("Reel stats: links, Reels API refresh, seller page", async helper => {
++  const { page } = helper;
++
++  // 1. A new listing: wrong box / wrong site are refused in the form; a video another listing has is refused by the Hub.
++  await helper.goto("/listings");
++  await page.getByRole("button", { name: /New listing/ }).first().click();
++  await page.getByPlaceholder("1234 N Main St, Chicago, IL 60614").fill("TEST 99 W Reel Dup St, Chicago, IL 60601");
++  await page.getByLabel(/Seller name/).fill("Riley Demo");
++  await page.getByRole("button", { name: "Create listing" }).click();
++  await page.getByText("Seller's live page").waitFor({ timeout: 15000 });
++  await page.getByRole("button", { name: "Weekly numbers" }).click();
++  let card = page.getByTestId("reel-links");
++  await card.waitFor({ timeout: 10000 });
++  await card.getByLabel("Instagram Reel link").fill(LINKS.TikTok);
++  await card.getByRole("button", { name: "Save Reel links" }).click();
++  await page.getByText(/Instagram: That is a TikTok link/).waitFor({ timeout: 5000 });
++  await card.getByLabel("Instagram Reel link").fill("https://example.com/reel/abc");
++  await card.getByRole("button", { name: "Save Reel links" }).click();
++  await page.getByText(/Only Instagram, Facebook, TikTok and YouTube links work here/).waitFor({ timeout: 5000 });
++  await card.getByLabel("Instagram Reel link").fill(`${LINKS.Instagram}?utm_source=test`);
++  await card.getByRole("button", { name: "Save Reel links" }).click();
++  await page.getByText(/Instagram: this video is already linked to .*Remove it there first/).waitFor({ timeout: 8000 });
++  await card.screenshot({ path: "screenshots/reel-stats-duplicate.png" });
++
++  // 2. The demo listing: numbers from the Reels API, N/A where a platform doesn't show a count.
++  await helper.goto(`/listings/${DEMO}`);
++  await page.getByRole("button", { name: "Weekly numbers" }).click();
++  card = page.getByTestId("reel-links");
++  await card.waitFor({ timeout: 10000 });
++  await page.getByTestId("reel-instagram-views").waitFor({ timeout: 10000 });
++  const before = await numbers(page);
++  console.log("AGENT NUMBERS BEFORE", JSON.stringify(before));
++  for (const k of ["tiktok.views", "facebook.views", "facebook.likes", "youtube.views", "instagram.views", "instagram.likes"]) {
++    if (!/^[\d,]+$/.test(before[k])) throw new Error(`${k} should be a number, got "${before[k]}"`);
++  }
++  if (before["instagram.shares"] !== "N/A" || before["youtube.shares"] !== "N/A") throw new Error("Shares should be N/A on Instagram/YouTube");
++  if (!(await card.getByText(/As of /).count())) throw new Error("Missing 'As of' time");
++
++  // 3. Refresh now → background job → "Refreshing…" → new numbers → 10-minute countdown.
++  const btn = page.getByTestId("reel-refresh");
++  if (await btn.isDisabled()) {
++    console.log("Refresh is cooling down:", await btn.textContent());
++  } else {
++    await btn.click();
++    await page.getByText(/Refreshing\. New numbers show here/).waitFor({ timeout: 8000 });
++    await page.getByTestId("reel-queued").waitFor({ timeout: 8000 });
++    if (!(await btn.isDisabled())) throw new Error("Refresh should be disabled while refreshing");
++    await card.screenshot({ path: "screenshots/reel-stats-agent-queued.png" });
++    const t0 = Date.now();
++    await page.getByTestId("reel-queued").waitFor({ state: "detached", timeout: 300000 });
++    console.log("REFRESH TOOK", Math.round((Date.now() - t0) / 1000), "s");
++    if (await page.getByTestId("reel-api-error").count()) throw new Error(`API error: ${await page.getByTestId("reel-api-error").textContent()}`);
++    await page.getByText(/Refresh in \d+:\d\d/).waitFor({ timeout: 8000 });
++    if (!(await btn.isDisabled())) throw new Error("Refresh should be disabled during the cooldown");
++  }
++  const after = await numbers(page);
++  console.log("AGENT NUMBERS AFTER", JSON.stringify(after));
++  await card.scrollIntoViewIfNeeded();
++  await card.screenshot({ path: "screenshots/reel-stats-agent.png" });
++
++  // 4. Seller page (public link, no login): the Reels play on the page with their numbers.
++  const origin = new URL(page.url()).origin;
++  for (const [name, vp] of [["mobile", { width: 390, height: 844 }], ["desktop", { width: 1100, height: 900 }]] as const) {
++    const ctx2 = await page.context().browser()!.newContext({ viewport: vp });
++    const sp = await ctx2.newPage();
++    await sp.goto(`${origin}/s/${SELLER}`);
++    const sec = sp.getByTestId("seller-reels");
++    await sec.waitFor({ timeout: 15000 });
++    for (const p of ["instagram", "facebook", "tiktok", "youtube"]) await sp.getByTestId(`seller-reel-${p}`).waitFor({ timeout: 5000 });
++    const totals = ((await sp.getByTestId("seller-reels-totals").textContent()) ?? "").replace(/\s+/g, " ");
++    console.log("SELLER TOTALS", name, totals);
++    if (!/Views[\d,]+/.test(totals)) throw new Error(`Seller totals missing views: ${totals}`);
++    await sp.getByTestId("seller-reel-player").waitFor({ timeout: 10000 });
++    await sec.scrollIntoViewIfNeeded();
++    await sp.waitForTimeout(12000); // let the embedded player draw
++    await sec.screenshot({ path: `screenshots/reel-stats-seller-${name}.png` });
++    await sp.getByTestId("seller-reel-youtube").getByRole("button").click();
++    await sp.waitForTimeout(4000);
++    if (!((await sp.getByTestId("seller-reel-player").getAttribute("src")) ?? "").startsWith("https://www.youtube.com/embed/")) throw new Error("Player did not switch to YouTube");
++    await ctx2.close();
++  }
++}).catch(() => process.exit(1));
+diff --git a/src/components/hub/ReelStats.tsx b/src/components/hub/ReelStats.tsx
+new file mode 100644
+index 0000000..e71d718
+--- /dev/null
++++ b/src/components/hub/ReelStats.tsx
+@@ -0,0 +1,202 @@
++// Reels linked on a listing: the agent's card (paste links, see numbers, refresh) and
++// the seller's section (watch the Reel on the page, with views, likes, comments, shares).
++import { useMutation, useQuery } from "convex/react";
++import { ArrowUpRight, Eye, Heart, Loader2, MessageCircle, RefreshCw, Share2 } from "lucide-react";
++import { useEffect, useState } from "react";
++import { toast } from "sonner";
++import { api } from "../../../convex/_generated/api";
++import type { Doc } from "../../../convex/_generated/dataModel";
++import { REEL_LABEL, REEL_PLACEHOLDER, REEL_PLATFORMS, type ReelPlatform, parseReelFor } from "../../../convex/reelLinks";
++
++const ago = (t: number) => {
++  const m = Math.round((Date.now() - t) / 60000);
++  if (m < 1) return "just now";
++  if (m < 60) return `${m} min ago`;
++  const h = Math.round(m / 60);
++  if (h < 24) return `${h}h ago`;
++  const d = Math.round(h / 24);
++  return d < 14 ? `${d}d ago` : new Date(t).toLocaleDateString();
++};
++const asOf = (t: number) => new Date(t).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
++const mmss = (ms: number) => { const s = Math.max(0, Math.ceil(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
++const errMsg = (e: unknown) => (e instanceof Error ? e.message.replace(/^.*Uncaught Error:\s*/s, "").split("\n")[0] : "Something went wrong");
++const num = (n?: number) => (n == null ? "N/A" : n.toLocaleString());
++// Seller rows are narrow on a phone: 1,810,096 becomes 1.8M there (full number in the tooltip and the totals).
++const short = (n: number) => (n >= 100_000 ? new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(n) : n.toLocaleString());
++const METRICS = [
++  ["views", "Views", Eye],
++  ["likes", "Likes", Heart],
++  ["comments", "Comments", MessageCircle],
++  ["shares", "Shares", Share2],
++] as const;
++type Counts = { views?: number; likes?: number; comments?: number; shares?: number };
++
++// ---------- Agent: Weekly numbers tab ----------
++
++export function ReelLinksCard({ l }: { l: Doc<"listings"> }) {
++  const data = useQuery(api.reelStats.forListing, { id: l._id });
++  const saveLinks = useMutation(api.reelStats.saveLinks);
++  const refresh = useMutation(api.reelStats.requestRefresh);
++  const [vals, setVals] = useState<Record<ReelPlatform, string>>({ instagram: "", facebook: "", tiktok: "", youtube: "" });
++  const [busy, setBusy] = useState(false);
++  const [now, setNow] = useState(Date.now());
++  const cooling = !!data?.cooldownUntil && data.cooldownUntil > now;
++  useEffect(() => {
++    if (!data?.cooldownUntil) return;
++    const t = setInterval(() => setNow(Date.now()), 1000);
++    return () => clearInterval(t);
++  }, [data?.cooldownUntil]);
++  const saved = data ? data.platforms.map(p => p.link).join("|") : null;
++  // biome-ignore lint/correctness/useExhaustiveDependencies: reload the boxes only when the saved links change
++  useEffect(() => {
++    if (data) setVals(Object.fromEntries(data.platforms.map(p => [p.platform, p.link])) as Record<ReelPlatform, string>);
++  }, [saved]);
++  if (!data) return <div className="rounded-2xl bg-white p-4 ring-1 ring-black/5"><Loader2 className="size-5 animate-spin text-stone-400" aria-label="Loading" /></div>;
++
++  const dirty = data.platforms.some(p => (vals[p.platform] ?? "").trim() !== p.link);
++  const anyLink = data.platforms.some(p => p.link);
++  const submit = async (e: React.FormEvent) => {
++    e.preventDefault();
++    for (const p of REEL_PLATFORMS) {
++      const raw = (vals[p] ?? "").trim();
++      if (!raw) continue;
++      try { parseReelFor(p, raw); } catch (err) { toast.error(`${REEL_LABEL[p]}: ${errMsg(err)}`); return; }
++    }
++    setBusy(true);
++    try {
++      const r = await saveLinks({ id: l._id, instagram: vals.instagram ?? "", facebook: vals.facebook ?? "", tiktok: vals.tiktok ?? "", youtube: vals.youtube ?? "" });
++      toast.success(r.changed ? "Saved. Reading the numbers now, usually 1-3 minutes." : "Saved");
++    } catch (err) { toast.error(errMsg(err)); } finally { setBusy(false); }
++  };
++  const doRefresh = async () => {
++    try { await refresh({ id: l._id }); toast.success("Refreshing. New numbers show here in 1-3 minutes."); } catch (err) { toast.error(errMsg(err)); }
++  };
++
++  return (
++    <form onSubmit={submit} className="rounded-2xl bg-white p-4 ring-1 ring-black/5" data-testid="reel-links">
++      <div className="flex flex-wrap items-start justify-between gap-3">
++        <div className="min-w-0">
++          <div className="font-semibold">Reels for this listing</div>
++          <p className="mt-0.5 text-[15px] text-stone-600">Paste this property's Reel link for each platform. Views, likes, comments and shares are updated every morning, when you save links and when you tap Refresh now. Your seller sees the Reels and the numbers.</p>
++        </div>
++        <button type="button" onClick={doRefresh} disabled={!anyLink || dirty || !!data.queued || cooling} title={cooling ? "Each listing can be refreshed once every 10 minutes" : undefined} data-testid="reel-refresh" className="inline-flex shrink-0 items-center gap-1.5 rounded-xl px-3 py-2 text-sm font-semibold ring-1 ring-stone-300 disabled:opacity-50">
++          <RefreshCw className={`size-4 ${data.queued ? "animate-spin" : ""}`} aria-hidden /> {data.queued ? "Refreshing…" : cooling ? `Refresh in ${mmss((data.cooldownUntil ?? 0) - now)}` : "Refresh now"}
++        </button>
++      </div>
++      {data.queued && <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900" data-testid="reel-queued">{data.queued.kind === "links" ? "Reading the new links" : "Refreshing the numbers"} now (started {ago(data.queued.requestedAt)}). This usually takes 1-3 minutes; the numbers update here by themselves.</p>}
++      {data.error && !data.error.platform && !data.queued && <p className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800" data-testid="reel-api-error">{data.error.message}</p>}
++      <div className="mt-3 space-y-3">
++        {data.platforms.map(p => {
++          const s = p.stat;
++          const rowErr = !data.queued && data.error?.platform === p.platform ? data.error.message : null;
++          return (
++            <div key={p.platform} className="rounded-xl bg-stone-50 p-3" data-testid={`reel-row-${p.platform}`}>
++              <label className="block text-sm font-medium text-stone-700">{REEL_LABEL[p.platform]} link
++                <input className="mt-1 w-full rounded-lg border border-stone-300 bg-white px-3 py-2 text-[15px] outline-none focus:border-[#9C7434]" aria-label={`${REEL_LABEL[p.platform]} Reel link`} inputMode="url" placeholder={REEL_PLACEHOLDER[p.platform]} value={vals[p.platform] ?? ""} onChange={e => setVals({ ...vals, [p.platform]: e.target.value })} />
++              </label>
++              {rowErr && <p className="mt-1.5 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800" data-testid={`reel-${p.platform}-api-error`}>{rowErr}</p>}
++              {p.link && (
++                <div className="mt-2">
++                  {s?.okAt ? (
++                    <>
++                      <dl className="grid grid-cols-4 gap-2 text-center">
++                        {METRICS.map(([k, label]) => (
++                          <div key={k} className="rounded-lg bg-white py-1.5 ring-1 ring-stone-200">
++                            <dd className={`font-display text-xl ${s[k] == null ? "text-stone-400" : ""}`} data-testid={`reel-${p.platform}-${k}`}>{num(s[k])}</dd>
++                            <dt className="text-xs text-stone-500">{label}</dt>
++                          </div>
++                        ))}
++                      </dl>
++                      <p className="mt-1.5 text-xs text-stone-500">As of {asOf(s.okAt)}{s.detail ? ` · ${s.detail}` : ""}</p>
++                    </>
++                  ) : !s?.error ? (
++                    <p className="text-sm text-stone-500">{data.queued ? "Fetching…" : "Waiting for the first read."}</p>
++                  ) : null}
++                  {s?.error && <p className="mt-1.5 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800" data-testid={`reel-${p.platform}-error`}>{s.okAt ? `Couldn't update ${ago(s.checkedAt)}, showing the last known numbers. ` : `Couldn't read this Reel ${ago(s.checkedAt)}. `}{s.error}</p>}
++                </div>
++              )}
++            </div>
++          );
++        })}
++      </div>
++      <div className="mt-3 flex flex-wrap items-center gap-3">
++        <button disabled={busy || !dirty} className="rounded-xl bg-[#0A0A0A] px-6 py-2.5 font-semibold text-white disabled:opacity-40">Save Reel links</button>
++        <span className="text-sm text-stone-500">N/A means the platform doesn't show that number publicly.</span>
++      </div>
++    </form>
++  );
++}
++
++// ---------- Seller: private page ----------
++
++export type SellerReel = Counts & { platform: ReelPlatform; url: string; embedUrl?: string; checkedAt?: number };
++
++export function SellerReels({ reels }: { reels: SellerReel[] }) {
++  const [sel, setSel] = useState<ReelPlatform | null>(null);
++  if (!reels.length) return null;
++  const cur = reels.find(r => r.platform === sel) ?? reels.find(r => r.embedUrl) ?? reels[0];
++  const total = (k: keyof Counts) => (reels.some(r => r[k] != null) ? reels.reduce((a, r) => a + (r[k] ?? 0), 0) : undefined);
++  const checked = Math.max(0, ...reels.map(r => r.checkedAt ?? 0));
++  return (
++    <section className="rounded-2xl bg-white p-5 ring-1 ring-black/5" data-testid="seller-reels">
++      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
++        <h2 className="font-display text-xl">Your Reel across social</h2>
++        {checked > 0 && <span className="text-sm text-stone-500">Updated {ago(checked)}</span>}
++      </div>
++
++      <dl className="mt-4 grid grid-cols-2 gap-2 text-center sm:grid-cols-4" data-testid="seller-reels-totals">
++        {METRICS.map(([k, label, Icon]) => (
++          <div key={k} className="rounded-xl bg-[#F7F5F1] px-1 py-3">
++            <dt className="flex items-center justify-center gap-1 text-[11px] uppercase tracking-[0.1em] text-stone-500"><Icon className="size-3.5 text-[#9C7434]" aria-hidden />{label}</dt>
++            <dd className="mt-1 font-display text-2xl">{total(k) == null ? "–" : total(k)?.toLocaleString()}</dd>
++          </div>
++        ))}
++      </dl>
++
++      <div className="mt-5 grid gap-5 sm:grid-cols-[minmax(0,18rem)_minmax(0,1fr)]">
++        <div>
++          {cur.embedUrl ? (
++            <div className="mx-auto aspect-[9/16] w-full max-w-[20rem] overflow-hidden rounded-2xl bg-[#0A0A0A]">
++              <iframe key={cur.embedUrl} src={cur.embedUrl} title={`${REEL_LABEL[cur.platform]} Reel`} className="size-full border-0" loading="lazy" allow="autoplay; clipboard-write; encrypted-media; picture-in-picture; web-share" allowFullScreen referrerPolicy="strict-origin-when-cross-origin" data-testid="seller-reel-player" />
++            </div>
++          ) : (
++            <a href={cur.url} target="_blank" rel="noreferrer" className="mx-auto grid aspect-[9/16] w-full max-w-[20rem] place-items-center rounded-2xl bg-[#0A0A0A] p-6 text-center text-white">
++              <span><span className="font-display text-lg">Watch on {REEL_LABEL[cur.platform]}</span><ArrowUpRight className="mx-auto mt-2 size-5 text-[#D9BC8C]" aria-hidden /></span>
++            </a>
++          )}
++        </div>
++
++        <ul className="space-y-2 self-start">
++          {reels.map(r => {
++            const on = r.platform === cur.platform;
++            return (
++              <li key={r.platform} data-testid={`seller-reel-${r.platform}`}>
++                <div className={`rounded-xl p-3 ring-1 transition ${on ? "bg-[#FBF7EF] ring-[#9C7434]" : "ring-stone-200"}`}>
++                  <div className="flex items-center justify-between gap-3">
++                    <button type="button" onClick={() => setSel(r.platform)} aria-pressed={on} className="min-w-0 text-left font-semibold">
++                      {REEL_LABEL[r.platform]}{on ? <span className="ml-2 text-xs font-medium text-[#7A5A25]">playing</span> : <span className="ml-2 text-xs font-medium text-stone-500 underline">watch here</span>}
++                    </button>
++                    <a href={r.url} target="_blank" rel="noreferrer" className="inline-flex shrink-0 items-center gap-0.5 text-sm text-stone-600">Open<ArrowUpRight className="size-4 text-[#9C7434]" aria-hidden /></a>
++                  </div>
++                  {r.checkedAt ? (
++                    <dl className="mt-2 grid grid-cols-4 gap-1 text-center">
++                      {METRICS.map(([k, label]) => (
++                        <div key={k}>
++                          <dd className={`font-display text-lg ${r[k] == null ? "text-stone-300" : ""}`} title={r[k]?.toLocaleString()}>{r[k] == null ? "–" : short(r[k] as number)}</dd>
++                          <dt className="text-[11px] text-stone-500">{label}</dt>
++                        </div>
++                      ))}
++                    </dl>
++                  ) : (
++                    <p className="mt-1 text-sm text-stone-500">Numbers show after the next morning update.</p>
++                  )}
++                </div>
++              </li>
++            );
++          })}
++        </ul>
++      </div>
++      <p className="mt-4 text-xs text-stone-500">Totals so far, read from each platform's public page every morning. A dash means that platform doesn't show the number publicly.</p>
++    </section>
++  );
++}
+diff --git a/src/pages/DemoSellerPage.tsx b/src/pages/DemoSellerPage.tsx
+index 9fcb372..5036d89 100644
+--- a/src/pages/DemoSellerPage.tsx
++++ b/src/pages/DemoSellerPage.tsx
+@@ -43,6 +43,7 @@ export function buildDemoData(now = Date.now()): SellerPortalData {
+       { weekOf: w1, zillowViews: 1284, zillowSaves: 41, mlsSaved: 9, mlsMaybe: 6, mlsNotInterested: 3, adViews: undefined, adClicks: undefined, reelViews: 6420, tiktokViews: 2310, fbViews: 1870, youtubeViews: 940, auto: ["reel", "youtube"], updatedAt: at(5) },
+       { weekOf: w2, zillowViews: 862, zillowSaves: 27, mlsSaved: 12, mlsMaybe: 7, mlsNotInterested: 4, adViews: undefined, adClicks: undefined, reelViews: 9810, tiktokViews: 3480, fbViews: 2650, youtubeViews: 1520, auto: ["reel", "youtube"], updatedAt: at(0, 3) },
+     ],
++    reels: [],
+     counts: { showings: 14, feedback: 4, openHouse: 23 },
+     events: [
+       ev("e1", "offer", "Offer received", 0, { body: "Your agent will call you today to walk through terms.", when: "Today" }),
+diff --git a/src/pages/ListingDetailPage.tsx b/src/pages/ListingDetailPage.tsx
+index 269207c..bf2a9fa 100644
+--- a/src/pages/ListingDetailPage.tsx
++++ b/src/pages/ListingDetailPage.tsx
+@@ -11,6 +11,7 @@ import { StatusChip, ago, errMsg, inputCls } from "./ListingsPage";
+ import { formatFreeAddress, formatPrice } from "../../convex/address";
+ import { AgentAdCampaigns } from "../components/hub/AdCampaigns";
+ import { ListingAdOrder } from "../components/hub/AdOrder";
++import { ReelLinksCard } from "../components/hub/ReelStats";
+ import { PlanBuilder } from "./ListingPlanPage";
+ 
+ type Tab = "steps" | "numbers" | "next" | "ads" | "activity" | "details";
+@@ -134,17 +135,10 @@ const FIELDS = [
+   ["mlsSaved", "MLS: favorite"],
+   ["mlsMaybe", "MLS: maybe"],
+   ["mlsNotInterested", "MLS: not interested"],
+-  ["reelViews", "Reel views (optional)"],
++  ["reelViews", "Instagram Reel views"],
+ ] as const;
+ type Metric = Doc<"listingMetrics">;
+-const autoKind = (k: string) => (k.startsWith("zillow") ? "zillow" : k === "reelViews" ? "reel" : k === "youtubeViews" ? "youtube" : "");
+-// The listing Reel on other channels: lifetime views (+ optional link). TikTok/Facebook have no feed.
+-const SOCIAL = [
+-  ["tiktokViews", "TikTok views", "tiktokLink", "tiktok"],
+-  ["fbViews", "Facebook views", "facebookLink", "facebook"],
+-  ["youtubeViews", "YouTube Shorts views", "", "youtube"],
+-] as const;
+-
++const autoKind = (k: string) => (k.startsWith("zillow") ? "zillow" : k === "reelViews" ? "reel" : "");
+ function CopyChip({ text }: { text: string }) {
+   return (
+     <button type="button" onClick={() => { void navigator.clipboard.writeText(text); toast.success("Copied"); }} className="inline-flex items-center gap-1 rounded-md bg-stone-100 px-2 py-0.5 font-mono text-[14px] text-stone-800 ring-1 ring-stone-200">
+@@ -213,17 +207,6 @@ function AutoSources({ l, myEmail }: { l: Doc<"listings">; myEmail: string }) {
+             {open && <ForwardHelp myEmail={myEmail} />}
+           </div>
+         </div>
+-        <div className="flex gap-3">
+-          <span className={`mt-1 size-2.5 shrink-0 rounded-full ${z.reel ? "bg-emerald-500" : "bg-stone-300"}`} aria-hidden />
+-          <div className="min-w-0 flex-1">
+-            <div className="font-medium">Instagram Reel views</div>
+-            {z.reel ? (
+-              <p className="text-[15px] text-stone-600" data-testid="reel-status">On. <a href={z.reel.permalink} target="_blank" rel="noreferrer" className="font-semibold text-[#7A5A25] underline">The Reel</a> has {z.reel.views.toLocaleString()} views{z.reel.matchedBy === "caption" ? " (found by the address in its caption)" : ""}. Updates twice a day.</p>
+-            ) : (
+-              <p className="text-[15px] text-stone-600" data-testid="reel-status">Not yet. Once the Reel is on @spacematchchicago with “{street.replace(/\s+(st|ave|rd|blvd|dr|ct|pl|ln|pkwy|ter|way)\.?$/i, "")}” in the caption, its views show up here. You can also paste the Reel link under Details.</p>
+-            )}
+-          </div>
+-        </div>
+       </div>
+     </div>
+   );
+@@ -236,17 +219,14 @@ function Numbers({ l, metrics, thisWeek, myEmail }: { l: Doc<"listings">; metric
+   const isAuto = (k: string) => !!cur?.auto?.includes(autoKind(k));
+   const [vals, setVals] = useState<Record<string, string>>({});
+   useEffect(() => {
+-    setVals({
+-      ...Object.fromEntries([...FIELDS, ...SOCIAL].map(([k]) => [k, cur?.[k] != null ? String(cur[k]) : ""])),
+-      tiktokLink: l.links?.tiktok ?? "", facebookLink: l.links?.facebook ?? "",
+-    });
+-  }, [wk, cur?._id, cur?.updatedAt, l.links?.tiktok, l.links?.facebook]);
++    setVals(Object.fromEntries(FIELDS.map(([k]) => [k, cur?.[k] != null ? String(cur[k]) : ""])));
++  }, [wk, cur?._id, cur?.updatedAt]);
+   const submit = async (e: React.FormEvent) => {
+     e.preventDefault();
+     const n: Record<string, number | undefined> = {};
+-    for (const [k] of [...FIELDS, ...SOCIAL]) n[k] = vals[k] === "" || vals[k] == null ? undefined : Number(vals[k]);
++    for (const [k] of FIELDS) n[k] = vals[k] === "" || vals[k] == null ? undefined : Number(vals[k]);
+     try {
+-      await save({ id: l._id, weekOf: wk, ...n, tiktokLink: vals.tiktokLink ?? "", facebookLink: vals.facebookLink ?? "" });
++      await save({ id: l._id, weekOf: wk, ...n });
+       toast.success("Saved. Your seller sees it now.");
+     } catch (err) {
+       toast.error(errMsg(err));
+@@ -260,7 +240,7 @@ function Numbers({ l, metrics, thisWeek, myEmail }: { l: Doc<"listings">; metric
+           <div className="text-center"><div className="text-xs text-stone-500">Week of</div><div className="font-semibold">{wkLabel(wk)}{wk === thisWeek && " (this week)"}</div></div>
+           <button type="button" disabled={wk >= thisWeek} onClick={() => setWk(shiftWeek(wk, 1))} className="rounded-full px-3 py-1 text-sm ring-1 ring-stone-200 disabled:opacity-30">›</button>
+         </div>
+-        <p className="mt-3 text-[15px] text-stone-600">Type the connectMLS numbers (favorite / maybe / not interested). Zillow and Reel numbers fill in by themselves once connected below. About 30 seconds.</p>
++        <p className="mt-3 text-[15px] text-stone-600">Type the connectMLS numbers (favorite / maybe / not interested). Zillow fills in by itself, and Reel numbers come from the Reel links below. About 30 seconds.</p>
+         <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+           {FIELDS.map(([k, label]) => (
+             <label key={k} className="block text-xs font-medium text-stone-600">{label}{isAuto(k) && <span className="ml-1 font-semibold text-emerald-700">· auto</span>}
+@@ -268,28 +248,9 @@ function Numbers({ l, metrics, thisWeek, myEmail }: { l: Doc<"listings">; metric
+             </label>
+           ))}
+         </div>
+-        <div className="mt-4 border-t border-stone-100 pt-3" data-testid="social-fields">
+-          <div className="font-medium">Reel on other channels (optional)</div>
+-          <p className="text-[15px] text-stone-600">Total views so far, from the TikTok or Facebook app. YouTube fills in by itself when the Short has the street in its title.</p>
+-          <div className="mt-2 space-y-2">
+-            {SOCIAL.map(([k, label, linkKey]) => (
+-              <div key={k} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)] gap-2">
+-                <label className="block text-sm font-medium text-stone-600">{label}{isAuto(k) && <span className="ml-1 font-semibold text-emerald-700">· auto</span>}
+-                  <input aria-label={label} className={`${inputCls} ${isAuto(k) ? "bg-stone-50 text-stone-500" : ""}`} inputMode="numeric" readOnly={isAuto(k)} value={vals[k] ?? ""} onChange={e => setVals({ ...vals, [k]: e.target.value.replace(/[^\d]/g, "") })} />
+-                </label>
+-                {linkKey ? (
+-                  <label className="block text-sm font-medium text-stone-600">Link
+-                    <input aria-label={`${label.split(" ")[0]} link`} className={inputCls} placeholder="https://…" value={vals[linkKey] ?? ""} onChange={e => setVals({ ...vals, [linkKey]: e.target.value })} />
+-                  </label>
+-                ) : (
+-                  <p className="self-end pb-2 text-sm text-stone-500">{l.ytAuto ? <>Auto from <a className="font-semibold text-[#7A5A25] underline" href={l.ytAuto.url} target="_blank" rel="noreferrer">the Short</a>, twice a day</> : "Auto once matched; or type it"}</p>
+-                )}
+-              </div>
+-            ))}
+-          </div>
+-        </div>
+         <button className="mt-4 w-full rounded-xl bg-[#0A0A0A] py-2.5 font-semibold text-white sm:w-auto sm:px-6">Save week</button>
+       </form>
++      <ReelLinksCard l={l} />
+       <AutoSources l={l} myEmail={myEmail} />
+       {metrics.length > 0 && (
+         <div className="overflow-x-auto rounded-2xl bg-white ring-1 ring-black/5">
+@@ -484,14 +445,14 @@ function Details({ l }: { l: Doc<"listings"> }) {
+   const [f, setF] = useState({
+     address: l.address, mlsNumber: l.mlsNumber ?? "", price: l.price ?? "", photoUrl: l.photoUrl ?? "", liveDate: l.liveDate ?? "",
+     sellerName: l.sellerName, sellerEmail: l.sellerEmail ?? "", sellerPhone: l.sellerPhone ?? "",
+-    zillow: l.links?.zillow ?? "", website: l.links?.website ?? "", reel: l.links?.reel ?? "", tour: l.links?.tour ?? "",
++    zillow: l.links?.zillow ?? "", website: l.links?.website ?? "", tour: l.links?.tour ?? "",
+   });
+   const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement>) => setF({ ...f, [k]: e.target.value });
+   const save = async (e: React.FormEvent) => {
+     e.preventDefault();
+-    const { zillow, website, reel, tour, ...rest } = f;
++    const { zillow, website, tour, ...rest } = f;
+     try {
+-      await update({ id: l._id, ...rest, links: { zillow, website, reel, tour } });
++      await update({ id: l._id, ...rest, links: { zillow, website, tour } });
+       toast.success("Saved");
+     } catch (err) { toast.error(errMsg(err)); }
+   };
+@@ -518,8 +479,8 @@ function Details({ l }: { l: Doc<"listings"> }) {
+         <h3 className="font-semibold">Links on the seller's page</h3>
+         {field("zillow", "Zillow listing", "https://www.zillow.com/…")}
+         {field("website", "Property website", "https://…")}
+-        {field("reel", "Instagram Reel", "https://www.instagram.com/reel/…")}
+         {field("tour", "3D tour", "https://…")}
++        <p className="text-sm text-stone-500">Reel links (Instagram, Facebook, TikTok, YouTube) are under <b>Weekly numbers</b>.</p>
+       </section>
+       <div className="flex flex-wrap items-center justify-between gap-3">
+         <button className="rounded-xl bg-[#0A0A0A] px-6 py-2.5 font-semibold text-white">Save details</button>
+diff --git a/src/pages/SellerPortalPage.tsx b/src/pages/SellerPortalPage.tsx
+index f295905..dfa3d84 100644
+--- a/src/pages/SellerPortalPage.tsx
++++ b/src/pages/SellerPortalPage.tsx
+@@ -5,6 +5,7 @@ import { useParams } from "react-router";
+ import { LAUNCH_STEPS } from "../../convex/launchSteps";
+ import { api } from "../../convex/_generated/api";
+ import { SellerAdCampaigns } from "../components/hub/AdCampaigns";
++import { SellerReels } from "../components/hub/ReelStats";
+ 
+ const ago = (t: number) => {
+   const m = Math.round((Date.now() - t) / 60000);
+@@ -172,7 +173,7 @@ export function SellerPortalView({ data, token, demo, top, bottom }: { data: Por
+   const linkBtns = [
+     { href: data.links.zillow, label: "Zillow", icon: Home },
+     { href: data.links.website, label: "Property website", icon: Globe },
+-    { href: data.links.reel, label: "Instagram Reel", icon: PlayCircle },
++    ...(data.reels.length ? [] : [{ href: data.links.reel, label: "Instagram Reel", icon: PlayCircle }]),
+     { href: data.links.tour, label: "3D tour", icon: Eye },
+   ].filter(l => l.href);
+ 
+@@ -252,7 +253,8 @@ export function SellerPortalView({ data, token, demo, top, bottom }: { data: Por
+           )}
+         </section>
+ 
+-        <SocialReel data={data} />
++        {/* Linked Reels (player + numbers); listings with only hand-typed view counts keep the old rows. */}
++        {data.reels.length ? <SellerReels reels={data.reels} /> : <SocialReel data={data} />}
+ 
+         <NextSteps data={data} token={token} demo={demo} />
+ 

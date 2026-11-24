@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#0A0A0A" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="SpaceMatch" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, viewport-fit=cover" />
+    <!-- Every page load opens a WebSocket to the Convex deployment before
+         anything renders (auth restore, then data). Warming the TCP+TLS
+         connection while the bundle downloads removes that handshake from
+         the critical path. Vite substitutes %VITE_CONVEX_URL% at build time. -->
+    <link rel="preconnect" href="%VITE_CONVEX_URL%" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link href="https://fonts.googleapis.com/css2?family=Mada:wght@400;500;600;700&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet" />
+    <title>SpaceMatch Agent Hub</title>
+    <meta name="description" content="SpaceMatch Agent Hub: forms, vendors, CMAs and tools in one place." />
+    <meta property="og:site_name" content="SpaceMatch Inc." />
+    <meta property="og:title" content="SpaceMatch Agent Hub" />
+    <meta property="og:description" content="Leads, CMAs, forms, listings and vendors for the SpaceMatch team, in one place." />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://hub.spacematchinc.com/" />
+    <meta property="og:image" content="https://hub.spacematchinc.com/og-image.jpg" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="SpaceMatch Agent Hub" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="SpaceMatch Agent Hub" />
+    <meta name="twitter:description" content="Leads, CMAs, forms, listings and vendors for the SpaceMatch team, in one place." />
+    <meta name="twitter:image" content="https://hub.spacematchinc.com/og-image.jpg" />
+    <script>try{if(localStorage.getItem("hub-text-size")==="large")document.documentElement.classList.add("text-large")}catch(e){}</script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
