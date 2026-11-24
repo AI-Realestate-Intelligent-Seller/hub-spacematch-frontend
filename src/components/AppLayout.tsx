@@ -1,3 +1,4 @@
+import { hasConvexDeployment } from "@/auth/convexClient";
 import { useCurrentUser, useSession } from "@/auth/session";
 import { useMutation, useQuery } from "convex/react";
 import {
@@ -45,6 +46,7 @@ const lastPing = new Map<string, number>();
 function useAdoptionPing(path: string) {
   const ping = useMutation(api.adoption.ping);
   useEffect(() => {
+    if (!hasConvexDeployment) return;
     const send = () => {
       const area = areaOf(path);
       if (!area || document.visibilityState === "hidden") return;
