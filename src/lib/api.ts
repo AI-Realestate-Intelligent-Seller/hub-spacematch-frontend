@@ -1,10 +1,9 @@
 // Client for the new Express backend (backend/).
 //
-// Development: leave VITE_API_URL empty. Requests go to "/api/v1/..." on the Vite dev
-// server, which forwards them to the backend (see server.proxy in vite.config.ts).
-// Production: set VITE_API_URL to the API's origin (e.g. https://api.hub.spacematchinc.com).
+// Requests are same-origin by default so auth cookies work. Vite proxies them locally
+// and vercel.json proxies them on Vercel. Set VITE_API_URL to override the API origin.
 
-const API_BASE = `${(import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ?? ""}/api/v1`;
+const API_BASE = `${import.meta.env.VITE_API_URL?.trim().replace(/\/$/, "") ?? ""}/api/v1`;
 
 /** The error shape every backend error uses. */
 export class ApiError extends Error {

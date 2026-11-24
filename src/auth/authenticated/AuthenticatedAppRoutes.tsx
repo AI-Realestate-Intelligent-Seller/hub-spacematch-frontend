@@ -1,4 +1,5 @@
 import { Navigate, Route, Routes } from "react-router";
+import { hasConvexDeployment } from "@/auth/convexClient";
 import { OAUTH_CALLBACK_PATH } from "@/auth/oauthReturn";
 import { SpaceSession } from "@/auth/SpaceSession";
 import { RosterGate } from "@/components/RosterGate";
@@ -97,7 +98,7 @@ export function AuthenticatedRoutes() {
       {/* Lead Desk one-tap link for the booked agent (token, no login) */}
       <Route path="/a/:token" element={<AgentApptPage />} />
 
-      <Route path={OAUTH_CALLBACK_PATH} element={<ViktorOAuthCallbackPage />} />
+      <Route path={OAUTH_CALLBACK_PATH} element={hasConvexDeployment ? <ViktorOAuthCallbackPage /> : <Navigate to="/login" replace />} />
 
       <Route element={<ProtectedRoute />}>
         <Route element={<AppLayout />}>
@@ -165,9 +166,11 @@ export function AuthenticatedAppRoutes() {
   return (
     <SessionProvider>
       <SpaceSession>
-        <RosterGate>
+        {hasConvexDeployment ? (
+          <RosterGate><AuthenticatedRoutes /></RosterGate>
+        ) : (
           <AuthenticatedRoutes />
-        </RosterGate>
+        )}
       </SpaceSession>
     </SessionProvider>
   );

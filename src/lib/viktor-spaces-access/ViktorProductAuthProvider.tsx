@@ -1,6 +1,7 @@
 import { ConvexAuthProvider } from "@convex-dev/auth/react";
+import { ConvexProvider } from "convex/react";
 import type { ReactNode } from "react";
-import { convex } from "@/auth/convexClient";
+import { convex, hasConvexDeployment } from "@/auth/convexClient";
 
 export function ViktorProductAuthProvider({
   children,
@@ -10,5 +11,6 @@ export function ViktorProductAuthProvider({
   enabled: boolean;
 }) {
   if (!enabled) return <>{children}</>;
+  if (!hasConvexDeployment) return <ConvexProvider client={convex}>{children}</ConvexProvider>;
   return <ConvexAuthProvider client={convex}>{children}</ConvexAuthProvider>;
 }

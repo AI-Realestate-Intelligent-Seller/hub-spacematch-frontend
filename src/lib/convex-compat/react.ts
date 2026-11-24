@@ -20,7 +20,7 @@ const reported = new Set<string>();
 
 // biome-ignore lint/suspicious/noExplicitAny: same loose signature as Convex's runtime implementation
 export function useQuery(query: any, ...args: any[]): any {
-  const skip = args[0] === "skip";
+  const skip = !import.meta.env.VITE_CONVEX_URL?.trim() || args[0] === "skip";
   const argsObject: Record<string, Value> = skip ? {} : (args[0] ?? {});
   const queryReference = typeof query === "string" ? makeFunctionReference<"query">(query) : query;
   const queryName = getFunctionName(queryReference);

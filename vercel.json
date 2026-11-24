@@ -6,6 +6,10 @@
   "outputDirectory": "dist",
   "rewrites": [
     {
+      "source": "/api/v1/:path*",
+      "destination": "https://hub-spacematch-backend.vercel.app/api/v1/:path*"
+    },
+    {
       "source": "/((?!assets/|__viktor_meta\\.json).*)",
       "destination": "/index.html"
     }
