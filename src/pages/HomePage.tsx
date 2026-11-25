@@ -12,6 +12,8 @@ import { MOMENTS, myTools } from "@/lib/catalog";
 import { smsHref, TOOLS, telHref, toolHref } from "@/lib/hub";
 import { AnnouncementsPreview } from "@/pages/AnnouncementsPage";
 import { api } from "../../convex/_generated/api";
+import { useApiData } from "@/lib/apiData";
+import { helpApi } from "@/lib/helpApi";
 import { formatAddress } from "../../convex/address";
 
 // Today = the one-screen Home (Michael 2026-10-29, #team-app-design 1793285849.414399):
@@ -281,7 +283,7 @@ export function HomePage() {
   const quota = useQuery(api.cma.quota, {});
   const counts = useQuery(api.forms.counts);
   const requests = useQuery(api.cma.list);
-  const help = useQuery(api.help.list);
+  const help = useApiData("help:list", () => helpApi.list(), { pollMs: 60_000 }).data; // new backend
   const decide = useMutation(api.cma.decideApproval);
   const refresh = useMutation(api.hubToday.requestRefresh);
   const [viewAs, setViewAs] = useState<string | undefined>(undefined);

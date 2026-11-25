@@ -6,6 +6,7 @@ import { CodeHeader, CodeInput, resendLabel, useCodeTimer } from "./SignIn";
 import { Button } from "./ui/button";
 import { Card, CardContent } from "./ui/card";
 import { Input } from "./ui/input";
+import { PasswordInput } from "./ui/password-input";
 import { Label } from "./ui/label";
 
 // Sign-up against the new backend: create account → 6-digit email code → signed in.
@@ -61,7 +62,7 @@ export function SignUp() {
             </div>
             <div className="space-y-2">
               <Label htmlFor="password">Password</Label>
-              <Input id="password" name="password" type="password" placeholder="••••••••" minLength={8} maxLength={128} autoComplete="new-password" className="h-11" required />
+              <PasswordInput id="password" name="password" placeholder="••••••••" minLength={8} maxLength={128} autoComplete="new-password" className="h-11" required />
               <p className="text-xs text-muted-foreground">At least 8 characters</p>
             </div>
             {error && <p className="text-sm text-destructive bg-destructive/10 rounded-lg px-3 py-2">{error}</p>}

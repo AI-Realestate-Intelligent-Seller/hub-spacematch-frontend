@@ -1,10 +1,9 @@
-import { useMutation, useQuery } from "convex/react";
 import { Check, Eye, Heart, Home, Mail, MessageSquare, Phone, PlayCircle, Globe, Users, CalendarCheck, ThumbsUp, Megaphone, Loader2, Lightbulb, ArrowUpRight } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { useParams } from "react-router";
 import { LAUNCH_STEPS } from "../../convex/launchSteps";
-import { api } from "../../convex/_generated/api";
 import { SellerAdCampaigns } from "../components/hub/AdCampaigns";
+import { listingsApi, type PortalData as ApiPortalData, useListingsData } from "@/lib/listingsApi";
 
 const ago = (t: number) => {
   const m = Math.round((Date.now() - t) / 60000);
@@ -35,7 +34,7 @@ function Stat({ icon: Icon, label, value, sub }: { icon: typeof Eye; label: stri
   );
 }
 
-type PortalData = NonNullable<ReturnType<typeof useQuery<typeof api.listings.portal>>>;
+type PortalData = ApiPortalData;
 
 // One row per channel the listing Reel is on. Channels with no number are hidden.
 function SocialReel({ data }: { data: PortalData }) {
@@ -83,9 +82,8 @@ function SocialReel({ data }: { data: PortalData }) {
 }
 
 function NextSteps({ data, token, demo }: { data: PortalData; token: string; demo?: boolean }) {
-  const approveMut = useMutation(api.suggestions.approvePlan);
   const [demoApprovedAt, setDemoApprovedAt] = useState<number | null>(null);
-  const approve = async (a: { token: string }) => { if (demo) setDemoApprovedAt(Date.now()); else await approveMut(a); };
+  const approve = async (a: { token: string }) => { if (demo) setDemoApprovedAt(Date.now()); else await listingsApi.approvePlan(a.token); };
   const [busy, setBusy] = useState(false);
   const list = demo && demoApprovedAt ? data.suggestions.map(x => ({ ...x, approvedAt: x.approvedAt ?? demoApprovedAt })) : data.suggestions;
   if (!list.length) return null;
@@ -125,10 +123,12 @@ function NextSteps({ data, token, demo }: { data: PortalData; token: string; dem
 
 export function SellerPortalPage() {
   const { token = "" } = useParams();
-  const data = useQuery(api.listings.portal, { token });
-  const seen = useMutation(api.listings.seen);
+  // Refreshes every minute so the seller sees new numbers and updates (Convex pushed them live).
+  const res = useListingsData(`portal:${token}`, () => listingsApi.portal(token), { pollMs: 60_000 });
+  // undefined = loading, null = link not found (or expired)
+  const data = res.notFound ? null : res.data;
   useEffect(() => {
-    if (data) void seen({ token }).catch(() => {});
+    if (data) void listingsApi.portalSeen(token).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [!!data, token]);
   useEffect(() => {

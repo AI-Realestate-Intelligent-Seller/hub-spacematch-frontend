@@ -1,13 +1,14 @@
-import { useMutation, useQuery } from "convex/react";
-import { AlertTriangle, LifeBuoy } from "lucide-react";
+import { AlertTriangle, Inbox, LifeBuoy, Loader2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link } from "react-router";
 import { toast } from "sonner";
-import type { Doc } from "../../convex/_generated/dataModel";
-import { api } from "../../convex/_generated/api";
 import { HELP_STATUSES, HELP_STATUS_LABEL, helpDueAt } from "../../convex/helpDue";
+import { EmptyState, FieldError, LoadError, Skeleton } from "@/components/hub/FormState";
+import { apiErrorMessage, useApiData } from "@/lib/apiData";
+import { type HelpRequest, type HelpStatus, helpApi } from "@/lib/helpApi";
 
-type Req = Doc<"helpRequests">;
+type Req = HelpRequest;
+const MAX_NOTE = 1000;
 const WHEN: Record<string, string> = { now: "Urgent", today: "Today", week: "This week" };
 const URG_TONE: Record<string, string> = { now: "bg-red-100 text-red-800", today: "bg-amber-100 text-amber-900", week: "bg-stone-100 text-stone-700" };
 const COL_TONE: Record<string, string> = { new: "bg-[#0A0A0A]", in_progress: "bg-[#9C7434]", waiting: "bg-amber-500", done: "bg-emerald-600" };
@@ -15,7 +16,7 @@ const dur = (ms: number) => {
   const m = Math.max(0, Math.round(ms / 60000));
   return m < 60 ? `${m}m` : m < 1440 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`;
 };
-const errMsg = (e: unknown) => String((e as Error)?.message ?? e).match(/Uncaught Error: ([^\n]+)/)?.[1] ?? "Something went wrong";
+const errMsg = apiErrorMessage;
 
 function useNow() {
   const [now, setNow] = useState(Date.now());
@@ -34,16 +35,25 @@ const NEXT: Record<string, [string, string][]> = {
 };
 
 function Card({ r, now, isAdmin, myEmail, support }: { r: Req; now: number; isAdmin: boolean; myEmail: string; support: { name: string; email: string }[] }) {
-  const setStatus = useMutation(api.help.setStatus);
-  const reassign = useMutation(api.help.reassign);
   const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const noteErr = note.trim().length > MAX_NOTE ? `Note is too long (${MAX_NOTE} characters max).` : "";
+  const reassign = ({ id, toEmail }: { id: string; toEmail: string }) => {
+    setBusy(true);
+    return helpApi.reassign(id, toEmail).finally(() => setBusy(false));
+  };
   const due = helpDueAt(r.urgency, r.createdAt);
   const overdue = r.status !== "done" && now > due;
   const amISupport = support.some(s => s.email === myEmail);
-  const move = (status: string) =>
-    setStatus({ id: r._id, status, reply: note || undefined })
+  const move = (status: string) => {
+    if (noteErr) return;
+    setBusy(true);
+    helpApi
+      .setStatus(r._id, status as HelpStatus, note.trim() || undefined)
       .then(() => { setNote(""); toast.success(`Moved to ${HELP_STATUS_LABEL[status]}. ${r.fromName.split(" ")[0]} gets an email.`); })
-      .catch(e => toast.error(errMsg(e)));
+      .catch(e => toast.error(errMsg(e)))
+      .finally(() => setBusy(false));
+  };
   return (
     <div className={`rounded-xl bg-white p-3 ring-1 ${overdue ? "ring-2 ring-red-500" : "ring-[#ebe5da]"}`} data-testid="help-card">
       <div className="flex flex-wrap items-center gap-1.5">
@@ -59,20 +69,24 @@ function Card({ r, now, isAdmin, myEmail, support }: { r: Req; now: number; isAd
       {r.reply && <p className="mt-1 text-sm text-stone-700"><b>Note:</b> {r.reply}</p>}
       <div className="mt-2 flex flex-col gap-1.5">
         {r.status !== "done" && (
-          <input value={note} onChange={e => setNote(e.target.value)} placeholder="Note for the agent (optional)" className="rounded-lg border border-stone-300 px-2.5 py-1.5 text-sm outline-none focus:border-[#9C7434]" />
+          <>
+            <input value={note} onChange={e => setNote(e.target.value.slice(0, MAX_NOTE + 1))} maxLength={MAX_NOTE + 1} aria-label="Note for the agent" aria-invalid={!!noteErr} placeholder="Note for the agent (optional)" className={`rounded-lg border px-2.5 py-1.5 text-sm outline-none focus:border-[#9C7434] ${noteErr ? "border-red-400" : "border-stone-300"}`} />
+            <FieldError msg={noteErr} />
+          </>
         )}
         <div className="flex flex-wrap gap-1.5">
           {(NEXT[r.status] ?? NEXT.new).map(([s, label]) => (
-            <button key={s} type="button" onClick={() => move(s)} className={`rounded-lg px-2.5 py-1 text-xs font-semibold ${s === "done" ? "bg-[#0A0A0A] text-white" : "ring-1 ring-stone-300"}`}>{label}</button>
+            <button key={s} type="button" disabled={busy || !!noteErr} onClick={() => move(s)} className={`rounded-lg px-2.5 py-1 text-xs font-semibold disabled:opacity-50 ${s === "done" ? "bg-[#0A0A0A] text-white" : "ring-1 ring-stone-300"}`}>{label}</button>
           ))}
+          {busy && <Loader2 className="size-4 animate-spin self-center text-stone-400" />}
         </div>
         {isAdmin && r.status !== "done" && (
           <div className="flex items-center gap-1.5">
-            <select aria-label="Reassign" value={r.toEmail} onChange={e => reassign({ id: r._id, toEmail: e.target.value }).then(() => toast.success("Reassigned")).catch(err => toast.error(errMsg(err)))} className="flex-1 rounded-lg border border-stone-300 bg-white px-2 py-1 text-xs">
+            <select aria-label="Reassign" disabled={busy} value={r.toEmail} onChange={e => reassign({ id: r._id, toEmail: e.target.value }).then(() => toast.success("Reassigned")).catch(err => toast.error(errMsg(err)))} className="flex-1 rounded-lg border border-stone-300 bg-white px-2 py-1 text-xs">
               {support.map(s => <option key={s.email} value={s.email}>{s.name}</option>)}
             </select>
             {amISupport && r.toEmail !== myEmail && (
-              <button type="button" onClick={() => reassign({ id: r._id, toEmail: myEmail }).then(() => toast.success("It's yours"))} className="rounded-lg px-2 py-1 text-xs font-semibold text-[#7a5a26] ring-1 ring-[#9C7434]/40">Take it</button>
+              <button type="button" disabled={busy} onClick={() => reassign({ id: r._id, toEmail: myEmail }).then(() => toast.success("It's yours")).catch(err => toast.error(errMsg(err)))} className="rounded-lg px-2 py-1 text-xs font-semibold text-[#7a5a26] ring-1 ring-[#9C7434]/40">Take it</button>
             )}
           </div>
         )}
@@ -82,7 +96,11 @@ function Card({ r, now, isAdmin, myEmail, support }: { r: Req; now: number; isAd
 }
 
 function MyRow({ r }: { r: Req }) {
-  const setStatus = useMutation(api.help.setStatus);
+  const [busy, setBusy] = useState(false);
+  const close = () => {
+    setBusy(true);
+    helpApi.setStatus(r._id, "done").then(() => toast("Closed")).catch(e => toast.error(errMsg(e))).finally(() => setBusy(false));
+  };
   return (
     <div className="p-4" data-testid="help-row">
       <div className="flex flex-wrap items-center gap-2">
@@ -93,8 +111,8 @@ function MyRow({ r }: { r: Req }) {
       {r.details && <p className="mt-1.5 whitespace-pre-wrap text-[15px] text-stone-800">{r.details}</p>}
       {r.reply && <p className="mt-1.5 text-[15px] text-stone-700"><b>Note from {r.statusBy ?? r.toName}:</b> {r.reply}</p>}
       {r.status !== "done" && (
-        <button type="button" onClick={() => setStatus({ id: r._id, status: "done" }).then(() => toast("Closed"))} className="mt-2 text-sm font-semibold text-[#7a5a26]">
-          Don't need it anymore
+        <button type="button" disabled={busy} onClick={() => confirm("Close this request? The person asked will see it's done.") && close()} className="mt-2 text-sm font-semibold text-[#7a5a26] disabled:opacity-50">
+          {busy ? "Closing…" : "Don't need it anymore"}
         </button>
       )}
     </div>
@@ -102,13 +120,18 @@ function MyRow({ r }: { r: Req }) {
 }
 
 export function HelpPage() {
-  const data = useQuery(api.help.list);
+  const { data, error, reload } = useApiData("help:list", () => helpApi.list(), { pollMs: 60_000 });
   const now = useNow();
   const [fTo, setFTo] = useState("");
   const [fFrom, setFFrom] = useState("");
   const [fUrg, setFUrg] = useState("");
   const [mobileCol, setMobileCol] = useState("new");
-  if (!data) return null;
+  if (!data) return (
+    <div className="space-y-6">
+      <div className="flex items-center gap-3"><LifeBuoy className="size-7 text-[#9C7434]" /><h1 className="font-['Playfair_Display'] text-3xl font-bold">Help requests</h1></div>
+      {error ? <LoadError error={error} onRetry={() => void reload()} what="help requests" /> : <Skeleton rows={3} className="h-24" />}
+    </div>
+  );
   const rows = data.toMe.filter(r => (!fTo || r.toEmail === fTo) && (!fFrom || r.fromEmail === fFrom) && (!fUrg || r.urgency === fUrg));
   const agents = [...new Map(data.toMe.map(r => [r.fromEmail, r.fromName])).entries()].sort((a, b) => a[1].localeCompare(b[1]));
   const col = (s: string) => {
@@ -162,7 +185,7 @@ export function HelpPage() {
                     <span className={`size-2.5 rounded-full ${COL_TONE[s]}`} /> {HELP_STATUS_LABEL[s]} <span className="text-stone-500">{rows.filter(r => r.status === s).length}</span>
                   </div>
                   <div className="space-y-2">
-                    {items.length === 0 && <div className="px-1 py-3 text-sm text-stone-500">Nothing here.</div>}
+                    {items.length === 0 && <div className="px-1 py-3 text-sm text-stone-500">{s === "new" ? "No new requests." : s === "done" ? "Nothing finished yet." : "Nothing here."}</div>}
                     {items.map(r => <Card key={r._id} r={r} now={now} isAdmin={data.isAdmin} myEmail={data.myEmail} support={data.support} />)}
                   </div>
                 </div>
@@ -175,8 +198,10 @@ export function HelpPage() {
         <h2 className="mb-2 text-lg font-semibold">Your requests</h2>
         <div className="divide-y divide-stone-100 rounded-2xl bg-white ring-1 ring-[#ebe5da]">
           {data.mine.length === 0 && (
-            <div className="p-4 text-[15px] text-stone-600">
-              Nothing yet. Use <b>Request help</b> on anyone in <Link to="/home#team" className="font-semibold text-[#7a5a26]">Your support team</Link>.
+            <div className="p-2">
+              <EmptyState icon={<Inbox className="size-8" />} title="No requests yet">
+                Tap <b>Get help</b> on <Link to="/home" className="font-semibold text-[#7a5a26]">Home</Link> to ask the support team. Your requests and their answers show up here.
+              </EmptyState>
             </div>
           )}
           {data.mine.map(r => <MyRow key={r._id} r={r} />)}

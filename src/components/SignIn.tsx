@@ -6,6 +6,7 @@ import { ALLOWED_EMAIL_DOMAIN, authApi, authErrorMessage } from "@/lib/authApi";
 import { Button } from "./ui/button";
 import { Card, CardContent } from "./ui/card";
 import { Input } from "./ui/input";
+import { PasswordInput } from "./ui/password-input";
 import { Label } from "./ui/label";
 
 // Sign-in against the new backend (/api/v1/auth). Kept from the old Hub (Michael 2026-10-29):
@@ -164,7 +165,7 @@ export function SignIn() {
                   Forgot password?
                 </Button>
               </div>
-              <Input id="password" name="password" type="password" placeholder="••••••••" autoComplete="current-password" className="h-11" required />
+              <PasswordInput id="password" name="password" placeholder="••••••••" autoComplete="current-password" className="h-11" required />
             </div>
             <ErrorText error={error} />
             <Button type="submit" className="w-full h-11" disabled={loading}>
@@ -396,11 +397,11 @@ export function SignIn() {
         >
           <div className="space-y-2">
             <Label htmlFor="newPassword">New Password</Label>
-            <Input id="newPassword" name="newPassword" type="password" placeholder="••••••••" minLength={8} maxLength={128} autoComplete="new-password" className="h-11" required />
+            <PasswordInput id="newPassword" name="newPassword" placeholder="••••••••" minLength={8} maxLength={128} autoComplete="new-password" className="h-11" required />
           </div>
           <div className="space-y-2">
             <Label htmlFor="confirmPassword">Confirm New Password</Label>
-            <Input id="confirmPassword" name="confirmPassword" type="password" placeholder="••••••••" minLength={8} maxLength={128} autoComplete="new-password" className="h-11" required />
+            <PasswordInput id="confirmPassword" name="confirmPassword" placeholder="••••••••" minLength={8} maxLength={128} autoComplete="new-password" className="h-11" required />
           </div>
           <ErrorText error={error} />
           <Button type="submit" className="w-full h-11" disabled={loading}>

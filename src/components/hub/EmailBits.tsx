@@ -64,12 +64,12 @@ export function PctField({ label, value, onChange, step = 0.05, hint, testId }: 
   );
 }
 
-export function TextField({ label, value, onChange, placeholder, hint, testId, type = "text" }: { label: string; value: string; onChange: (s: string) => void; placeholder?: string; hint?: string; testId?: string; type?: string }) {
+export function TextField({ label, value, onChange, placeholder, hint, testId, type = "text", error, maxLength, onBlur }: { label: string; value: string; onChange: (s: string) => void; placeholder?: string; hint?: string; testId?: string; type?: string; error?: string; maxLength?: number; onBlur?: () => void }) {
   return (
     <label className="block">
       <span className={labelCls}>{label}</span>
-      <input type={type} data-testid={testId} className={`${inputCls} mt-1`} value={value} placeholder={placeholder} onChange={e => onChange(e.target.value)} />
-      {hint && <span className="mt-1 block text-[13px] text-stone-500">{hint}</span>}
+      <input type={type} data-testid={testId} className={`${inputCls} mt-1 ${error ? "border-red-400! focus:border-red-500!" : ""}`} value={value} placeholder={placeholder} maxLength={maxLength} aria-invalid={!!error} onBlur={onBlur} onChange={e => onChange(e.target.value)} />
+      {error ? <span role="alert" className="mt-1 block text-[13px] text-red-600">{error}</span> : hint && <span className="mt-1 block text-[13px] text-stone-500">{hint}</span>}
     </label>
   );
 }

@@ -1,13 +1,11 @@
 // "Pick a listing": fills a tool's form from a Hub listing so agents never retype
 // the address (CMA, Reel Studio, Seller lists). Michael 2026-11-02 "go all".
-import { useQuery } from "convex/react";
 import { Home } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
-import { api } from "../../../convex/_generated/api";
-import type { FunctionReturnType } from "convex/server";
+import { listingsApi, type PickedListing, useListingsData } from "@/lib/listingsApi";
 
-export type PickedListing = FunctionReturnType<typeof api.listings.pickList>[number];
+export type { PickedListing };
 
 export function ListingPicker({ onPick, label = "Use one of your listings", hint, className = "" }: {
   onPick: (l: PickedListing) => void;
@@ -15,7 +13,7 @@ export function ListingPicker({ onPick, label = "Use one of your listings", hint
   hint?: string;
   className?: string;
 }) {
-  const rows = useQuery(api.listings.pickList);
+  const rows = useListingsData("listings:pick", () => listingsApi.pick()).data?.items;
   const [params] = useSearchParams();
   const [value, setValue] = useState("");
   const fromUrl = useRef(false);

@@ -2,8 +2,7 @@
 // Ready-made library per client group · Rent vs own builder · Move-up builder · My templates (optional
 // builder, "Suggest for team" → Michael/Cris approve) · Review tab for admins/office. No AI, no sending
 // from the Hub: agents send from their own Gmail, or Lofty sends the Smart Plans.
-import { useMutation, useQuery } from "convex/react";
-import { ArrowRight, Calculator, ChevronDown, Download, FileText, Home, Loader2, Pencil, Plus, Send, Sparkles, Trash2, Users } from "lucide-react";
+import { ArrowRight, Calculator, ChevronDown, Download, FileText, Home, Inbox, Loader2, Mail, Pencil, Plus, Send, Sparkles, Trash2, Users } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { toast } from "sonner";
@@ -13,16 +12,34 @@ import {
 import { FIELDS, GROUPS, SEGMENTS, fill, fillSubject, libraryCsv, toLofty, type LibEmail } from "@/lib/emailLibrary";
 import { moveUpEmail, rentVsOwnEmail } from "@/lib/emailWriters";
 import { placeOf, usd } from "@/lib/homeMath";
-import { api } from "../../convex/_generated/api";
-import type { Doc, Id } from "../../convex/_generated/dataModel";
+import { EmptyState, FieldError, LoadError, Skeleton } from "@/components/hub/FormState";
+import { apiErrorMessage, fieldErrors, useApiData } from "@/lib/apiData";
+import { type EmailTemplate, emailTemplatesApi, unknownFields } from "@/lib/emailTemplatesApi";
 
 type Tab = "library" | "rent" | "moveup" | "mine" | "review";
-const errMsg = (e: unknown) => String((e as Error).message ?? e).match(/Uncaught Error: ([^\n]+)/)?.[1] ?? String((e as Error).message ?? e);
+const errMsg = apiErrorMessage;
+type Doc = EmailTemplate;
+
+/** Same rules as the backend (email-template.validation.ts). */
+function checkTemplate(t: { title: string; subject: string; body: string }): Record<string, string> {
+  const e: Record<string, string> = {};
+  const bad = (s: string) => unknownFields(s);
+  if (t.title.trim().length > 120) e.title = "Name is too long (120 characters max).";
+  if (!t.subject.trim()) e.subject = "Add a subject.";
+  else if (t.subject.trim().length > 200) e.subject = "Subject is too long (200 characters max).";
+  else if (bad(t.subject).length) e.subject = `Unknown field ${bad(t.subject).map(k => `{${k}}`).join(", ")}. Use the + buttons to add fields.`;
+  const body = t.body.trim();
+  if (!body) e.body = "Write something in the email first.";
+  else if (body.length < 20) e.body = "The email is too short to send (20 characters min).";
+  else if (body.length > 8000) e.body = "The email is too long (8000 characters max).";
+  else if (bad(body).length) e.body = `Unknown field ${bad(body).map(k => `{${k}}`).join(", ")}. Use the + buttons to add fields.`;
+  return e;
+}
 const LOFTY_READY = true; // 19 SM Smart Plans live in Lofty (tag-triggered) since 2026-10-31
 
 export function EmailsPage() {
   const [params, setParams] = useSearchParams();
-  const data = useQuery(api.emailTemplates.overview);
+  const { data, error, reload } = useApiData("email-templates", () => emailTemplatesApi.overview(), { pollMs: 120_000 });
   const tab = (params.get("tab") as Tab) || "library";
   const go = (t: Tab, extra: Record<string, string> = {}) => setParams({ tab: t, ...extra }, { replace: true });
   const tabs: { id: Tab; label: string; icon: React.ComponentType<{ className?: string }>; show?: boolean }[] = [
@@ -58,14 +75,15 @@ export function EmailsPage() {
       {tab === "library" && <Library team={data?.team ?? []} onEdit={d => { setDraft(d); go("mine"); }} />}
       {tab === "rent" && <RentVsOwn ratePct={data?.rate.ratePct ?? 7.24} rateNote={data ? `${data.rate.source}, ${data.rate.asOf}` : ""} canSetRate={!!data?.canReview} />}
       {tab === "moveup" && <MoveUp ratePct={data?.rate.ratePct ?? 7.24} />}
-      {tab === "mine" && <MyTemplates mine={data?.mine ?? []} draft={draft} clearDraft={() => setDraft(null)} canReview={!!data?.canReview} />}
-      {tab === "review" && data?.canReview && <Review rows={data.review} />}
+      {tab === "mine" && (data === undefined && error ? <LoadError error={error} onRetry={() => void reload()} what="your templates" />
+        : <MyTemplates mine={data?.mine} draft={draft} clearDraft={() => setDraft(null)} canReview={!!data?.canReview} />)}
+      {tab === "review" && (data === undefined ? (error ? <LoadError error={error} onRetry={() => void reload()} what="templates to review" /> : <Skeleton rows={2} />) : data.canReview && <Review rows={data.review} />)}
     </div>
   );
 }
 
 // ---------------- Ready-made library ----------------
-function Library({ team, onEdit }: { team: Doc<"emailTemplates">[]; onEdit: (d: { subject: string; body: string; basedOn?: string; segment?: string; title?: string }) => void }) {
+function Library({ team, onEdit }: { team: Doc[]; onEdit: (d: { subject: string; body: string; basedOn?: string; segment?: string; title?: string }) => void }) {
   const signer = useSigner();
   const [seg, setSeg] = useState(SEGMENTS[0].id);
   const [grp, setGrp] = useState(GROUPS[0].id);
@@ -182,7 +200,12 @@ function RentVsOwn({ ratePct, rateNote, canSetRate }: { ratePct: number; rateNot
   const [rentUp, setRentUp] = useState(3);
   const [save, setSave] = useState(4);
   const [compare, setCompare] = useState(true);
-  const setTeamRate = useMutation(api.emailTemplates.setRate);
+  const [rateBusy, setRateBusy] = useState(false);
+  const rateErr = rate !== null && !(rate > 1 && rate < 15) ? "Enter a rate between 1% and 15%." : "";
+  const saveTeamRate = (r: number) => {
+    setRateBusy(true);
+    emailTemplatesApi.setRate(r).then(() => { toast.success(`Team rate set to ${r}%`); setRate(null); }).catch(e => toast.error(errMsg(e))).finally(() => setRateBusy(false));
+  };
   const place = placeOf(zip);
   const input = {
     rent, extra, zip, ratePct: rate ?? ratePct, downPct: down, taxPct: tax,
@@ -232,7 +255,10 @@ function RentVsOwn({ ratePct, rateNote, canSetRate }: { ratePct: number; rateNot
         </button>
         {more && (
           <div className="grid grid-cols-2 gap-3 rounded-xl bg-[#F7F5F1] p-3">
-            <PctField label="Rate" value={rate ?? ratePct} onChange={setRate} hint={rate === null ? rateNote : "Your number"} />
+            <div>
+              <PctField label="Rate" value={rate ?? ratePct} onChange={setRate} hint={rate === null ? rateNote : "Your number"} />
+              <FieldError msg={rateErr} />
+            </div>
             <PctField label="Down payment" value={down} onChange={setDown} />
             <PctField label="Property tax / yr" value={tax} onChange={setTax} hint="% of price" />
             <MoneyField label="HOA / mo" value={hoa ?? (kind === "condo" ? 400 : 0)} onChange={setHoa} />
@@ -244,9 +270,9 @@ function RentVsOwn({ ratePct, rateNote, canSetRate }: { ratePct: number; rateNot
               <input type="checkbox" checked={compare} onChange={e => setCompare(e.target.checked)} className="size-4 accent-[#9C7434]" />
               Include the fair comparison (renting and saving the difference)
             </label>
-            {canSetRate && rate !== null && rate !== ratePct && (
-              <button type="button" className={`${btnLight} col-span-2`} onClick={() => setTeamRate({ ratePct: rate }).then(() => { toast.success(`Team rate set to ${rate}%`); setRate(null); })}>
-                Make {rate}% the team rate
+            {canSetRate && rate !== null && rate !== ratePct && !rateErr && (
+              <button type="button" disabled={rateBusy} className={`${btnLight} col-span-2`} onClick={() => saveTeamRate(rate)}>
+                {rateBusy && <Loader2 className="size-4 animate-spin" />} Make {rate}% the team rate
               </button>
             )}
           </div>
@@ -344,16 +370,29 @@ const STATUS: Record<string, [string, string]> = {
   declined: ["Not added to team", "bg-stone-100 text-stone-500"],
 };
 function MyTemplates({ mine, draft, clearDraft, canReview }: {
-  mine: Doc<"emailTemplates">[]; draft: { subject: string; body: string; basedOn?: string; segment?: string; title?: string } | null; clearDraft: () => void; canReview: boolean;
+  mine: Doc[] | undefined; draft: { subject: string; body: string; basedOn?: string; segment?: string; title?: string } | null; clearDraft: () => void; canReview: boolean;
 }) {
   const signer = useSigner();
-  const saveT = useMutation(api.emailTemplates.save);
-  const removeT = useMutation(api.emailTemplates.remove);
-  const suggestT = useMutation(api.emailTemplates.suggest);
-  const [edit, setEdit] = useState<{ id?: Id<"emailTemplates">; title: string; segment: string; subject: string; body: string; basedOn?: string } | null>(
+  const [rowBusy, setRowBusy] = useState<string | null>(null);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const rowAct = (id: string, fn: () => Promise<unknown>, ok: string) => {
+    setRowBusy(id);
+    fn().then(() => toast.success(ok)).catch(e => toast.error(errMsg(e))).finally(() => setRowBusy(null));
+  };
+  const [edit, setEditState] = useState<{ id?: string; title: string; segment: string; subject: string; body: string; basedOn?: string } | null>(
     draft ? { title: draft.title ?? "", segment: draft.segment ?? "other", subject: draft.subject, body: draft.body, basedOn: draft.basedOn } : null,
   );
   const [busy, setBusy] = useState(false);
+  type Edit = NonNullable<typeof edit>;
+  const setEdit = (next: Edit | null) => {
+    setEditState(next);
+    // Re-check fields that already show an error as the person fixes them.
+    if (next && Object.values(errors).some(Boolean)) {
+      const e = checkTemplate(next);
+      setErrors(err => Object.fromEntries(Object.keys(err).map(k => [k, e[k] ?? ""])));
+    }
+    if (!next) setErrors({});
+  };
   const bodyRef = useRef<HTMLTextAreaElement>(null);
   const insert = (key: string) => {
     if (!edit) return;
@@ -370,12 +409,16 @@ function MyTemplates({ mine, draft, clearDraft, canReview }: {
   };
   const doSave = async () => {
     if (!edit) return;
+    const errs = checkTemplate(edit);
+    setErrors(errs);
+    if (Object.keys(errs).length) return toast.error("Fix the highlighted fields first.");
     setBusy(true);
     try {
-      await saveT({ id: edit.id, title: edit.title, segment: edit.segment, subject: edit.subject, body: edit.body, basedOn: edit.basedOn });
+      const input = { title: edit.title.trim(), segment: edit.segment, subject: edit.subject.trim(), body: edit.body.trim(), basedOn: edit.basedOn ?? null };
+      if (edit.id) await emailTemplatesApi.update(edit.id, input); else await emailTemplatesApi.create(input);
       toast.success("Saved to My templates");
       setEdit(null); clearDraft();
-    } catch (e) { toast.error(errMsg(e)); } finally { setBusy(false); }
+    } catch (e) { setErrors(fieldErrors(e)); toast.error(errMsg(e)); } finally { setBusy(false); }
   };
   const sample = Object.fromEntries(FIELDS.map(f => [f.key, f.key.startsWith("agent") ? (f.key === "agent_name" ? signer.name : f.key === "agent_phone" ? signer.phone : signer.name.split(" ")[0]) : f.sample]));
   if (edit) {
@@ -383,7 +426,7 @@ function MyTemplates({ mine, draft, clearDraft, canReview }: {
       <div className="grid gap-4 lg:grid-cols-[1fr_1fr]">
         <section className={`${card} space-y-3`} data-testid="tpl-editor">
           <p className="text-[15px] text-stone-600">Start from a ready-made email or a blank page. Tap a field to drop it in where your cursor is.</p>
-          <TextField label="Name it (only you see this)" value={edit.title} onChange={t => setEdit({ ...edit, title: t })} placeholder="Open house follow-up" testId="tpl-title" />
+          <TextField label="Name it (only you see this)" value={edit.title} onChange={t => setEdit({ ...edit, title: t })} placeholder="Open house follow-up" testId="tpl-title" maxLength={120} error={errors.title} hint="Optional. The subject is used if you leave it blank." />
           <label className="block">
             <span className={labelCls}>Who it's for</span>
             <select className={`${inputCls} mt-1`} value={edit.segment} onChange={e => setEdit({ ...edit, segment: e.target.value })}>
@@ -391,20 +434,23 @@ function MyTemplates({ mine, draft, clearDraft, canReview }: {
               <option value="other">Other</option>
             </select>
           </label>
-          <TextField label="Subject" value={edit.subject} onChange={t => setEdit({ ...edit, subject: t })} placeholder="Quick question, {first_name}" testId="tpl-subject" />
+          <TextField label="Subject *" value={edit.subject} onChange={t => setEdit({ ...edit, subject: t })} placeholder="Quick question, {first_name}" testId="tpl-subject" maxLength={200} error={errors.subject} />
           <div>
-            <span className={labelCls}>Email</span>
+            <span className={labelCls}>Email *</span>
             <div className="mt-1 flex flex-wrap gap-1.5">
               {FIELDS.map(f => (
                 <button key={f.key} type="button" onClick={() => insert(f.key)} className="rounded-full bg-[#9C7434]/10 px-3 py-1 text-[13px] font-semibold text-[#9C7434]">+ {f.label}</button>
               ))}
             </div>
-            <textarea ref={bodyRef} data-testid="tpl-body" className={`${inputCls} mt-2 min-h-[280px] font-[inherit] leading-relaxed`} value={edit.body} onChange={e => setEdit({ ...edit, body: e.target.value })} />
-            <p className="mt-1 text-[13px] text-stone-500">Don't add a sign-off. Your name, phone and the team line are added for you.</p>
+            <textarea ref={bodyRef} data-testid="tpl-body" maxLength={8000} aria-invalid={!!errors.body} className={`${inputCls} mt-2 min-h-[280px] font-[inherit] leading-relaxed ${errors.body ? "border-red-400!" : ""}`} value={edit.body} onChange={e => setEdit({ ...edit, body: e.target.value })} />
+            <div className="mt-1 flex items-start justify-between gap-3">
+              <div><FieldError msg={errors.body} /><p className="text-[13px] text-stone-500">Don't add a sign-off. Your name, phone and the team line are added for you.</p></div>
+              <span className="shrink-0 text-[12px] text-stone-400">{edit.body.length}/8000</span>
+            </div>
           </div>
           <div className="flex flex-wrap gap-2">
-            <button type="button" className={btnDark} onClick={doSave} disabled={busy} data-testid="tpl-save">{busy ? <Loader2 className="size-4 animate-spin" /> : null} Save</button>
-            <button type="button" className={btnLight} onClick={() => { setEdit(null); clearDraft(); }}>Cancel</button>
+            <button type="button" className={btnDark} onClick={doSave} disabled={busy} data-testid="tpl-save">{busy ? <Loader2 className="size-4 animate-spin" /> : null} {busy ? "Saving…" : "Save"}</button>
+            <button type="button" className={btnLight} disabled={busy} onClick={() => { setEdit(null); clearDraft(); }}>Cancel</button>
           </div>
         </section>
         <div>
@@ -426,18 +472,23 @@ function MyTemplates({ mine, draft, clearDraft, canReview }: {
           <Link to="/emails?tab=library" className={btnLight}><FileText className="size-4" /> Start from ready-made</Link>
         </div>
       </section>
-      {mine.length === 0 && <p className="text-center text-[15px] text-stone-500">No templates yet.</p>}
-      {mine.map(t => (
+      {mine === undefined && <Skeleton rows={2} className="h-24" />}
+      {mine?.length === 0 && (
+        <EmptyState icon={<Mail className="size-8" />} title="No templates yet">
+          Tap <b>Blank</b> to write one, or <b>Make my own version</b> on any ready-made email. Only you see them until you suggest one for the team.
+        </EmptyState>
+      )}
+      {mine?.map(t => (
         <TemplateRow key={t._id} t={t} signer={signer}
           actions={
             <>
-              <button type="button" className={btnLight} onClick={() => setEdit({ id: t._id, title: t.title, segment: t.segment, subject: t.subject, body: t.body })}><Pencil className="size-4" /> Edit</button>
+              <button type="button" className={btnLight} disabled={rowBusy === t._id} onClick={() => setEdit({ id: t._id, title: t.title, segment: t.segment, subject: t.subject, body: t.body })}><Pencil className="size-4" /> Edit</button>
               {(t.status === "mine" || t.status === "declined") && (
-                <button type="button" className={btnLight} data-testid="tpl-suggest" onClick={() => suggestT({ id: t._id }).then(s => toast.success(s === "team" ? "Added to the team library" : "Sent to Michael and Cris to approve")).catch(e => toast.error(errMsg(e)))}>
+                <button type="button" className={btnLight} data-testid="tpl-suggest" disabled={rowBusy === t._id} onClick={() => rowAct(t._id, () => emailTemplatesApi.suggest(t._id), canReview ? "Added to the team library" : "Sent to the office to approve")}>
                   <Send className="size-4" /> Suggest for team
                 </button>
               )}
-              <button type="button" className={`${btnLight} text-red-700`} onClick={() => { if (confirm("Delete this template?")) removeT({ id: t._id }); }}><Trash2 className="size-4" /></button>
+              <button type="button" aria-label="Delete template" className={`${btnLight} text-red-700`} disabled={rowBusy === t._id} onClick={() => { if (confirm("Delete this template?")) rowAct(t._id, () => emailTemplatesApi.remove(t._id), "Template deleted"); }}>{rowBusy === t._id ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}</button>
             </>
           } />
       ))}
@@ -445,7 +496,7 @@ function MyTemplates({ mine, draft, clearDraft, canReview }: {
   );
 }
 
-function TemplateRow({ t, signer, actions }: { t: Doc<"emailTemplates">; signer: ReturnType<typeof useSigner>; actions: React.ReactNode }) {
+function TemplateRow({ t, signer, actions }: { t: Doc; signer: ReturnType<typeof useSigner>; actions: React.ReactNode }) {
   const [open, setOpen] = useState(false);
   const [label, cls] = STATUS[t.status] ?? STATUS.mine;
   const seg = SEGMENTS.find(s => s.id === t.segment)?.label ?? "Other";
@@ -466,10 +517,18 @@ function TemplateRow({ t, signer, actions }: { t: Doc<"emailTemplates">; signer:
 }
 
 // ---------------- Review (admins + office) ----------------
-function Review({ rows }: { rows: Doc<"emailTemplates">[] }) {
+function Review({ rows }: { rows: Doc[] }) {
   const signer = useSigner();
-  const review = useMutation(api.emailTemplates.review);
-  if (!rows.length) return <p className={`${card} text-center text-[15px] text-stone-500`}>Nothing waiting. When an agent suggests an email for the team, it shows up here and you get an email.</p>;
+  const [busy, setBusy] = useState<string | null>(null);
+  const review = ({ id, approve, note }: { id: string; approve: boolean; note?: string }) => {
+    setBusy(id);
+    return emailTemplatesApi.review(id, approve, note?.trim().slice(0, 500) || null).catch(e => { toast.error(errMsg(e)); throw e; }).finally(() => setBusy(null));
+  };
+  if (!rows.length) return (
+    <EmptyState icon={<Inbox className="size-8" />} title="Nothing waiting">
+      When an agent suggests an email for the team, it shows up here and you get an email.
+    </EmptyState>
+  );
   return (
     <div className="space-y-3">
       {rows.map(t => (
@@ -478,8 +537,8 @@ function Review({ rows }: { rows: Doc<"emailTemplates">[] }) {
           <TemplateRow t={t} signer={signer}
             actions={
               <>
-                <button type="button" className={btnDark} onClick={() => review({ id: t._id, approve: true }).then(() => toast.success("Added to the team library"))}>Approve for team</button>
-                <button type="button" className={btnLight} onClick={() => { const note = prompt("Why not? (optional, the agent sees this)") ?? undefined; review({ id: t._id, approve: false, note }).then(() => toast.success("Sent back")); }}>Not now</button>
+                <button type="button" className={btnDark} disabled={busy === t._id} onClick={() => review({ id: t._id, approve: true }).then(() => toast.success("Added to the team library"), () => {})}>{busy === t._id && <Loader2 className="size-4 animate-spin" />} Approve for team</button>
+                <button type="button" className={btnLight} disabled={busy === t._id} onClick={() => { const note = prompt("Why not? (optional, the agent sees this, 500 characters max)"); if (note === null) return; review({ id: t._id, approve: false, note }).then(() => toast.success("Sent back"), () => {}); }}>Not now</button>
               </>
             } />
         </div>

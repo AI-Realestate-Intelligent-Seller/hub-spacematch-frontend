@@ -17,6 +17,8 @@ import { DOCS, TEAM, TOOLS, toolHref } from "@/lib/hub";
 import { PLAYBOOKS } from "@/lib/playbooks";
 import { SCRIPTS, TEMPLATES } from "@/lib/templates";
 import { api } from "../../../convex/_generated/api";
+import { useApiData } from "@/lib/apiData";
+import { vendorsApi } from "@/lib/vendorsApi";
 import { formatAddress } from "../../../convex/address";
 import { FORMS } from "../../../convex/formDefs";
 
@@ -236,7 +238,7 @@ export function GlobalSearch({ big = false }: { big?: boolean }) {
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
   const nav = useNavigate();
-  const vendors = useQuery(api.vendors.list);
+  const vendors = useApiData("vendors:list", () => vendorsApi.list()).data; // new backend
   const rentals = useQuery(api.commissionBuildings.list);
   const requests = useQuery(api.cma.list);
   const inbox = useQuery(api.forms.inbox, {});
@@ -266,7 +268,7 @@ export function GlobalSearch({ big = false }: { big?: boolean }) {
           icon: ClipboardList,
         });
     }
-    for (const v of vendors?.vendors ?? []) {
+    for (const v of vendors?.items ?? []) {
       const s = score(
         q,
         v.name,
