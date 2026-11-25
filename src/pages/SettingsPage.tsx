@@ -20,6 +20,8 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { useTheme } from "@/contexts/ThemeContext";
 import { FubConnectCard } from "@/components/hub/FubConnectCard";
+import { ProfileCard } from "@/components/settings/ProfileCard";
+import { TeamManagementCard } from "@/components/settings/TeamManagementCard";
 import { StripeCard } from "@/components/hub/StripeCard";
 import { api } from "../../convex/_generated/api";
 
@@ -122,6 +124,10 @@ export function SettingsPage() {
           </div>
         </CardContent>
       </Card>
+
+      <ProfileCard />
+
+      {user?.role === "admin" && <TeamManagementCard />}
 
       <StripeCard />
 
@@ -268,7 +274,7 @@ export function SettingsPage() {
                     name="newPassword"
                     type="password"
                     placeholder="••••••••"
-                    minLength={6}
+                    minLength={8}
                     autoComplete="new-password"
                     required
                   />

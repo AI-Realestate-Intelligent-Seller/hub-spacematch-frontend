@@ -1,8 +1,9 @@
 import { Link } from "react-router";
 import { SignUp } from "@/components/SignUp";
+import { ALLOWED_EMAIL_DOMAIN } from "@/lib/authApi";
 import { Button } from "@/components/ui/button";
 
-// Creates an account on the new backend. Allowed: @spacematchinc.com emails, or invited people.
+// Creates an account on the new backend. Only @linchpin.net emails (ALLOWED_EMAIL_DOMAIN).
 export function SignupPage() {
   return (
     <div className="flex-1 flex items-center justify-center p-4 relative">
@@ -18,7 +19,7 @@ export function SignupPage() {
           </div>
           <h1 className="font-['Playfair_Display'] text-3xl font-bold tracking-tight">Create your Hub login</h1>
           <p className="text-muted-foreground text-[15px]">
-            Use your @spacematchinc.com email. Invited guests use the email they were invited with.
+            Only @{ALLOWED_EMAIL_DOMAIN} email addresses can create an account. We'll email you a code to confirm it.
           </p>
         </div>
 

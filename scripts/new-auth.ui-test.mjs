@@ -8,7 +8,7 @@ const require = createRequire(process.cwd() + "/package.json");
 const { chromium } = require("playwright");
 
 const [FE, LOG, SHOTS] = process.argv.slice(2);
-const EMAIL = `zz-ui-${Date.now()}@spacematchinc.com`;
+const EMAIL = `zz-ui-${Date.now()}@linchpin.net`;
 const PW = "Ui-test-pass-123";
 let failures = 0;
 const check = (name, ok, extra = "") => { console.log(`${ok ? "PASS" : "FAIL"}  ${name}${extra ? "  — " + extra : ""}`); if (!ok) failures++; };
@@ -28,6 +28,11 @@ try {
   page.on("pageerror", e => pageErrors.push(e.message));
   await page.goto(`${FE}/signup`);
   await page.fill("#name", "UI Test");
+  await page.fill("#email", "someone@gmail.com");
+  await page.fill("#password", PW);
+  await page.click("button[type=submit]");
+  await page.getByText("Only @linchpin.net email addresses can sign up.").waitFor({ timeout: 5000 });
+  check("sign-up form rejects a @gmail.com address", (await page.locator("#code").count()) === 0);
   await page.fill("#email", EMAIL);
   await page.fill("#password", PW);
   await page.click("button[type=submit]");
@@ -52,6 +57,8 @@ try {
 
   // ---- Sign out from the user menu → leaves the app
   await page.getByRole("menuitem", { name: /sign out/i }).click();
+  const overlay = await page.getByTestId("signing-out").waitFor({ timeout: 3000 }).then(() => true).catch(() => false);
+  check("'Signing out…' loading screen appears", overlay);
   await page.waitForURL(u => !u.pathname.startsWith("/home"), { timeout: 15000 });
   check("sign out from the menu leaves the app", !new URL(page.url()).pathname.startsWith("/home"), page.url());
   const me = await page.evaluate(() => fetch("/api/v1/users/me").then(r => r.status));

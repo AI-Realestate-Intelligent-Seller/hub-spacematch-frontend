@@ -1,5 +1,6 @@
 import { Link } from "react-router";
 import { SignIn } from "@/components/SignIn";
+import { ALLOWED_EMAIL_DOMAIN } from "@/lib/authApi";
 
 // Signs in through the new backend (/api/v1/auth). Viktor one-click sign-in is gone with Viktor.
 export function LoginPage() {
@@ -17,7 +18,7 @@ export function LoginPage() {
           </div>
           <h1 className="font-['Playfair_Display'] text-3xl font-bold tracking-tight">Agent Hub</h1>
           <p className="text-muted-foreground text-[15px]">
-            Sign in with your @spacematchinc.com email. You'll stay signed in on this phone.
+            Sign in with your @{ALLOWED_EMAIL_DOMAIN} email. You'll stay signed in on this phone.
           </p>
         </div>
 
