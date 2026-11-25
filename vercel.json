@@ -10,7 +10,7 @@
       "destination": "https://hub-spacematch-backend.vercel.app/api/v1/:path*"
     },
     {
-      "source": "/((?!assets/|__viktor_meta\\.json).*)",
+      "source": "/((?!assets/|tools/|logo-white\\.png$|favicon\\.png$|icon-192\\.png$|icon-512\\.png$|__viktor_meta\\.json).*)",
       "destination": "/index.html"
     }
   ]

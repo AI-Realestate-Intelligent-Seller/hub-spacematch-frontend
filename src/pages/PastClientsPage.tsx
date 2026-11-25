@@ -1,12 +1,15 @@
-import { useMutation, useQuery } from "convex/react";
-import { Check, Mail, MessageSquare, Pencil, Trash2, UserPlus } from "lucide-react";
+import { Check, Loader2, Mail, MessageSquare, Pencil, Trash2, UserPlus, Users } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router";
 import { toast } from "sonner";
-import { btnDark, btnGold, btnLight, Card, CopyBtn, H2, input, label, PageHead , toastErr } from "@/components/hub/mm";
-import { mailLink, prettyDate, smsLink, touchesFor } from "@/lib/marketMe";
-import type { Doc, Id } from "../../convex/_generated/dataModel";
-import { api } from "../../convex/_generated/api";
+import { useSession } from "@/auth/session";
+import { EmptyState, FieldError, LoadError, Skeleton, errorBorder } from "@/components/hub/FormState";
+import { btnDark, btnGold, btnLight, Card, CopyBtn, H2, input, label, PageHead } from "@/components/hub/mm";
+import { apiErrorMessage, fieldErrors, useApiData } from "@/lib/apiData";
+import { check, fieldRules, orNull, typeEmail, typeName, typePhone } from "@/lib/formRules";
+import { type PastClient, pastClientsApi } from "@/lib/marketApi";
+import { chicagoToday, mailLink, prettyDate, smsLink, touchesFor } from "@/lib/marketMe";
+import { z } from "zod";
 
 // /past-clients — each agent's own past clients + what to send this month (anniversaries, holidays,
 // quarterly market updates, review ask a week after closing). Only the agent sees their list.
@@ -17,48 +20,87 @@ const SIDES = [
   { v: "landlord", l: "Landlord" },
 ];
 const empty = { name: "", phone: "", email: "", address: "", closedOn: "", side: "buyer" };
-const err = toastErr;
+const err = (e: unknown) => toast.error(apiErrorMessage(e));
+
+/** Same rules as the backend (past-client.validation.ts). */
+const clientSchema = z.object({
+  name: z.string().trim().min(1, "Type the client's name.").min(2, "Name is too short.").max(80, "Name is too long (80 characters max).").regex(/^[\p{L}][\p{L}\s.'&,-]*$/u, "Use letters only (spaces, & . ' - are fine)."),
+  closedOn: z.string().min(1, "Pick the closing date.").refine(v => v >= "1950-01-01", "That date looks too far back.").refine(v => Date.parse(`${v}T12:00:00Z`) <= Date.now() + 180 * 864e5, "Closing date can't be more than 6 months ahead."),
+  side: z.enum(["buyer", "seller", "renter", "landlord"], { error: "Pick who they were." }),
+  phone: fieldRules.phone,
+  email: fieldRules.email,
+  address: fieldRules.text(160, "Address"),
+});
 
 export function PastClientsPage() {
-  const me = useQuery(api.hubMe.me);
-  const rows = useQuery(api.marketMe.myClients);
-  const save = useMutation(api.marketMe.saveClient);
-  const remove = useMutation(api.marketMe.removeClient);
-  const mark = useMutation(api.marketMe.markTouch);
-  const [f, setF] = useState<typeof empty & { id?: Id<"pastClients"> }>(empty);
+  const { user } = useSession();
+  const { data, error, reload } = useApiData("past-clients", () => pastClientsApi.list());
+  const rows = data?.items;
+  const [f, setFState] = useState<typeof empty & { id?: string }>(empty);
+  const [errors, setErrors] = useState<Record<string, string>>({});
   const [formOpen, setFormOpen] = useState(false);
-  if (!rows || !me) return <div className="p-6 text-[17px] text-stone-700">Loading…</div>;
-  const agentFirst = me.firstName || "your agent";
+  const [busy, setBusy] = useState<string | null>(null); // "save" or a client id
+  const setF = (next: typeof f) => {
+    setFState(next);
+    if (Object.values(errors).some(Boolean)) {
+      const e = check(clientSchema, next);
+      setErrors(err => Object.fromEntries(Object.keys(err).map(k => [k, e[k] ?? ""])));
+    }
+  };
+  if (!rows) return (
+    <div className="mx-auto max-w-2xl space-y-4 pb-6" data-testid="pc-page">
+      <PageHead title="Past clients" sub="Add the people you've helped. Each month you see who to text and what to say." />
+      {error ? <LoadError error={error} onRetry={() => void reload()} what="your past clients" /> : <Skeleton rows={3} className="h-28" />}
+    </div>
+  );
+  const agentFirst = user?.name.split(/\s+/)[0] || "your agent";
   const due = rows.flatMap(c => touchesFor(c, agentFirst).map(t => ({ c, t }))).sort((a, b) => a.t.due.localeCompare(b.t.due));
 
-  const edit = (c: Doc<"pastClients">) => {
-    setF({ id: c._id, name: c.name, phone: c.phone ?? "", email: c.email ?? "", address: c.address ?? "", closedOn: c.closedOn, side: c.side });
+  const edit = (c: PastClient) => {
+    setErrors({});
+    setFState({ id: c._id, name: c.name, phone: c.phone ?? "", email: c.email ?? "", address: c.address ?? "", closedOn: c.closedOn, side: c.side });
     setFormOpen(true);
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
-  const submit = () =>
-    save({ ...f, phone: f.phone || undefined, email: f.email || undefined, address: f.address || undefined })
-      .then(() => {
-        toast.success(f.id ? "Saved" : "Client added");
-        setF(empty);
-        setFormOpen(false);
-      })
-      .catch(err);
+  const submit = async () => {
+    const errs = check(clientSchema, f);
+    setErrors(errs);
+    if (Object.keys(errs).length) return;
+    setBusy("save");
+    try {
+      const body = { name: f.name.trim(), phone: orNull(f.phone), email: orNull(f.email), address: orNull(f.address), closedOn: f.closedOn, side: f.side };
+      if (f.id) await pastClientsApi.update(f.id, body); else await pastClientsApi.add(body);
+      toast.success(f.id ? "Saved" : "Client added");
+      setFState(empty);
+      setFormOpen(false);
+    } catch (e) {
+      setErrors(fieldErrors(e));
+      err(e);
+    } finally {
+      setBusy(null);
+    }
+  };
+  const run = (id: string, fn: () => Promise<unknown>, ok: string) => {
+    setBusy(id);
+    fn().then(() => toast.success(ok)).catch(err).finally(() => setBusy(null));
+  };
 
   return (
     <div className="mx-auto max-w-2xl space-y-4 pb-6" data-testid="pc-page">
       <PageHead title="Past clients" sub="Add the people you've helped. Each month you see who to text and what to say." />
-      <button type="button" className={btnGold} onClick={() => { setF(empty); setFormOpen(v => !v); }} data-testid="pc-add-toggle"><UserPlus className="size-[18px]" /> Add a client</button>
+      <button type="button" className={btnGold} onClick={() => { setFState(empty); setErrors({}); setFormOpen(v => !v); }} data-testid="pc-add-toggle"><UserPlus className="size-[18px]" /> Add a client</button>
 
       {formOpen && (
         <Card testid="pc-form">
           <H2>{f.id ? "Edit client" : "New past client"}</H2>
           <label className={label} htmlFor="pc-name">Name</label>
-          <input id="pc-name" className={input} value={f.name} onChange={e => setF({ ...f, name: e.target.value })} data-testid="pc-name" />
+          <input id="pc-name" className={`${input} ${errorBorder(errors.name)}`} maxLength={80} aria-invalid={!!errors.name} value={f.name} onChange={e => setF({ ...f, name: typeName(e.target.value, 80) })} data-testid="pc-name" />
+          <FieldError msg={errors.name} />
           <div className="mt-3 grid grid-cols-2 gap-2">
             <div>
               <label className={label} htmlFor="pc-closed">Closing date</label>
-              <input id="pc-closed" type="date" className={input} value={f.closedOn} onChange={e => setF({ ...f, closedOn: e.target.value })} data-testid="pc-closed" />
+              <input id="pc-closed" type="date" min="1950-01-01" max={new Date(Date.parse(`${chicagoToday()}T12:00:00Z`) + 180 * 864e5).toISOString().slice(0, 10)} className={`${input} ${errorBorder(errors.closedOn)}`} aria-invalid={!!errors.closedOn} value={f.closedOn} onChange={e => setF({ ...f, closedOn: e.target.value })} data-testid="pc-closed" />
+              <FieldError msg={errors.closedOn} />
             </div>
             <div>
               <label className={label} htmlFor="pc-side">They were my</label>
@@ -70,16 +112,19 @@ export function PastClientsPage() {
           <div className="mt-3 grid grid-cols-2 gap-2">
             <div>
               <label className={label} htmlFor="pc-phone">Cell</label>
-              <input id="pc-phone" type="tel" className={input} value={f.phone} onChange={e => setF({ ...f, phone: e.target.value })} data-testid="pc-phone" />
+              <input id="pc-phone" type="tel" inputMode="tel" placeholder="(312) 555-0100" className={`${input} ${errorBorder(errors.phone)}`} aria-invalid={!!errors.phone} value={f.phone} onChange={e => setF({ ...f, phone: typePhone(e.target.value) })} data-testid="pc-phone" />
+              <FieldError msg={errors.phone} />
             </div>
             <div>
               <label className={label} htmlFor="pc-email">Email</label>
-              <input id="pc-email" type="email" className={input} value={f.email} onChange={e => setF({ ...f, email: e.target.value })} />
+              <input id="pc-email" type="email" maxLength={200} className={`${input} ${errorBorder(errors.email)}`} aria-invalid={!!errors.email} value={f.email} onChange={e => setF({ ...f, email: typeEmail(e.target.value) })} />
+              <FieldError msg={errors.email} />
             </div>
           </div>
           <label className={`${label} mt-3`} htmlFor="pc-address">Property address (optional)</label>
-          <input id="pc-address" className={input} value={f.address} onChange={e => setF({ ...f, address: e.target.value })} />
-          <button type="button" className={`${btnGold} mt-3 w-full`} onClick={submit} data-testid="pc-save">{f.id ? "Save changes" : "Add client"}</button>
+          <input id="pc-address" maxLength={160} className={`${input} ${errorBorder(errors.address)}`} aria-invalid={!!errors.address} value={f.address} onChange={e => setF({ ...f, address: e.target.value })} />
+          <FieldError msg={errors.address} />
+          <button type="button" disabled={busy === "save"} className={`${btnGold} mt-3 w-full disabled:opacity-60`} onClick={submit} data-testid="pc-save">{busy === "save" && <Loader2 className="size-[18px] animate-spin" />}{busy === "save" ? "Saving…" : f.id ? "Save changes" : "Add client"}</button>
         </Card>
       )}
 
@@ -99,7 +144,7 @@ export function PastClientsPage() {
                   {c.email && <a href={mailLink(t.title, t.text, c.email)} className={c.phone ? btnLight : btnDark}><Mail className="size-[18px]" /> Email</a>}
                   {!c.phone && !c.email && <CopyBtn text={t.text} label="Copy" />}
                   {t.to && <Link to={t.to} className={btnLight}>{t.toLabel}</Link>}
-                  <button type="button" className={btnLight} onClick={() => mark({ id: c._id, key: t.key, done: true }).then(() => toast.success("Marked done"))} data-testid="pc-done"><Check className="size-[18px]" /> Done</button>
+                  <button type="button" disabled={busy === c._id} className={`${btnLight} disabled:opacity-60`} onClick={() => run(c._id, () => pastClientsApi.markTouch(c._id, t.key, true), "Marked done")} data-testid="pc-done"><Check className="size-[18px]" /> Done</button>
                 </div>
               </li>
             ))}
@@ -110,7 +155,10 @@ export function PastClientsPage() {
       <Card testid="pc-list">
         <H2>All my past clients ({rows.length})</H2>
         {rows.length === 0 ? (
-          <p className="text-[16px] text-stone-700">None yet.</p>
+          <EmptyState icon={<Users className="size-8" />} title="No past clients yet"
+            action={<button type="button" className={btnGold} onClick={() => { setFState(empty); setErrors({}); setFormOpen(true); window.scrollTo({ top: 0, behavior: "smooth" }); }}><UserPlus className="size-[18px]" /> Add your first client</button>}>
+            Add the buyers and sellers you've closed with. Anniversaries, holidays and review asks then show up above each month.
+          </EmptyState>
         ) : (
           <ul className="divide-y divide-stone-100">
             {rows.map(c => (
@@ -120,7 +168,7 @@ export function PastClientsPage() {
                   <div className="text-[15px] text-stone-700">{SIDES.find(s => s.v === c.side)?.l} · closed {prettyDate(c.closedOn)}</div>
                 </div>
                 <button type="button" aria-label={`Edit ${c.name}`} className="grid size-11 place-items-center rounded-xl bg-[#F7F5F1]" onClick={() => edit(c)}><Pencil className="size-5" /></button>
-                <button type="button" aria-label={`Remove ${c.name}`} className="grid size-11 place-items-center rounded-xl bg-[#F7F5F1]" onClick={() => { if (confirm(`Remove ${c.name}?`)) remove({ id: c._id }).catch(err); }}><Trash2 className="size-5" /></button>
+                <button type="button" aria-label={`Remove ${c.name}`} disabled={busy === c._id} className="grid size-11 place-items-center rounded-xl bg-[#F7F5F1] disabled:opacity-60" onClick={() => { if (confirm(`Remove ${c.name}?`)) run(c._id, () => pastClientsApi.remove(c._id), "Client removed"); }}>{busy === c._id ? <Loader2 className="size-5 animate-spin" /> : <Trash2 className="size-5" />}</button>
               </li>
             ))}
           </ul>
