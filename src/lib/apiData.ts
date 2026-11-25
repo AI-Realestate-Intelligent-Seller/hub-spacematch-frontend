@@ -55,17 +55,26 @@ export async function apiSend<T>(method: "POST" | "PATCH" | "PUT" | "DELETE", pa
 export function useApiData<T>(key: string | null, fetcher: () => Promise<T>, opts: { pollMs?: number } = {}) {
   const [state, setState] = useState<{ key: string | null; data?: T; error?: ApiError | Error }>({ key: null });
   const fetchRef = useRef(fetcher);
+  const requestRef = useRef(0);
   fetchRef.current = fetcher;
 
   const load = useCallback(async () => {
     if (key === null) return;
+    const request = ++requestRef.current;
     try {
       const data = await fetchRef.current();
-      setState({ key, data });
+      if (request === requestRef.current) setState({ key, data });
     } catch (e) {
-      setState(s => ({ key, data: s.key === key ? s.data : undefined, error: e as Error }));
+      if (request === requestRef.current) {
+        setState(s => ({ key, data: s.key === key ? s.data : undefined, error: e as Error }));
+      }
     }
   }, [key]);
+
+  const reload = useCallback(() => {
+    setState(s => s.key === key && s.data === undefined && s.error ? { key } : s);
+    return load();
+  }, [key, load]);
 
   useEffect(() => {
     if (key === null) return;
@@ -75,6 +84,7 @@ export function useApiData<T>(key: string | null, fetcher: () => Promise<T>, opt
     document.addEventListener("visibilitychange", onFocus);
     const timer = opts.pollMs ? window.setInterval(() => document.visibilityState === "visible" && void load(), opts.pollMs) : undefined;
     return () => {
+      requestRef.current++;
       listeners.delete(load);
       document.removeEventListener("visibilitychange", onFocus);
       if (timer) window.clearInterval(timer);
@@ -86,7 +96,7 @@ export function useApiData<T>(key: string | null, fetcher: () => Promise<T>, opt
     data: current ? state.data : undefined,
     error: current ? state.error : undefined,
     notFound: current && state.error instanceof ApiError && state.error.status === 404,
-    reload: load,
+    reload,
   };
 }
 

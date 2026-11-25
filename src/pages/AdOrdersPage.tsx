@@ -1,29 +1,37 @@
-import { PayByCard } from "../components/PayByCard";
-import { useMutation, useQuery } from "convex/react";
+import { Loader2, Megaphone } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router";
 import { toast } from "sonner";
-import { api } from "../../convex/_generated/api";
-import type { Doc } from "../../convex/_generated/dataModel";
 import { PAY_STATUS, StatusTag, money } from "../components/hub/AdOrder";
+import { EmptyState, FieldError, LoadError, Skeleton } from "@/components/hub/FormState";
+import { apiErrorMessage, useApiData } from "@/lib/apiData";
+import { type AdOrder, adOrdersApi } from "@/lib/listingsApi";
 
-const errMsg = (e: unknown) => String((e as Error)?.message ?? e).match(/Uncaught Error: ([^\n]+)/)?.[1] ?? "Something went wrong";
-type Order = Doc<"adOrders"> & { tierName: string; hasKit: boolean };
+const errMsg = apiErrorMessage;
+type Order = AdOrder;
+const useQueue = () => useApiData("ad-orders:queue", () => adOrdersApi.queue(), { pollMs: 60_000 });
+const useConfig = () => useApiData("ad-orders:config", () => adOrdersApi.config());
 const day = (t?: number) => (t ? new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "");
 
 function OrderCard({ o }: { o: Order }) {
-  const decide = useMutation(api.adOrders.decide);
-  const setStatus = useMutation(api.adOrders.setStatus);
-  const setPayment = useMutation(api.adOrders.setPayment);
   const [tier, setTier] = useState(o.tier);
   const [note, setNote] = useState("");
-  const run = (p: Promise<unknown>, msg: string) => p.then(() => toast.success(msg)).catch(e => toast.error(errMsg(e)));
+  const [busy, setBusy] = useState(false);
+  const noteErr = note.trim().length > 500 ? "Note is too long (500 characters max)." : "";
+  const run = (fn: () => Promise<unknown>, msg: string) => {
+    if (noteErr) return;
+    setBusy(true);
+    fn().then(() => toast.success(msg)).catch(e => toast.error(errMsg(e))).finally(() => setBusy(false));
+  };
+  const decide = ({ action, tier: t, note: n }: { action: "approve" | "decline"; tier?: string; note?: string }) => () => adOrdersApi.decide(o._id, action, t, n?.trim() || null);
+  const setStatus = ({ status }: { status: "live" | "done" | "approved" }) => () => adOrdersApi.setStatus(o._id, status);
+  const setPayment = ({ paymentStatus, note: n }: { paymentStatus: "unpaid" | "paid" | "deducted" | "rolled"; note?: string }) => () => adOrdersApi.setPayment(o._id, paymentStatus, n);
   const billable = ["approved", "live", "done"].includes(o.status);
   return (
     <li className="rounded-2xl bg-white p-4 ring-1 ring-black/5" data-testid="order-card">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div>
-          <Link to={`/listings/${o.listingId}`} className="font-semibold hover:underline">{o.address.split(",")[0]}</Link>
+          {o.listingId ? <Link to={`/listings/${o.listingId}`} className="font-semibold hover:underline">{o.address.split(",")[0]}</Link> : <span className="font-semibold">{o.address.split(",")[0]} <span className="text-sm font-normal text-stone-400">(listing deleted)</span></span>}
           <div className="text-sm text-stone-500">{o.agentName} · ordered {day(o.createdAt)}</div>
         </div>
         <StatusTag s={o.status} />
@@ -47,28 +55,31 @@ function OrderCard({ o }: { o: Order }) {
               <option value="signature">Signature</option>
               <option value="luxury">Luxury</option>
             </select>
-            <input value={note} onChange={e => setNote(e.target.value)} placeholder="Note to agent (optional)" className="min-w-0 flex-1 rounded-lg border border-stone-200 px-2 py-1.5 text-sm" />
+            <input value={note} maxLength={501} onChange={e => setNote(e.target.value)} aria-label="Note to agent" aria-invalid={!!noteErr} placeholder="Note to agent (optional)" className={`min-w-0 flex-1 rounded-lg border px-2 py-1.5 text-sm ${noteErr ? "border-red-400" : "border-stone-200"}`} />
           </div>
-          <div className="flex gap-2">
-            <button onClick={() => run(decide({ id: o._id, action: "approve", tier, note: note || undefined }), "Approved — kit sent to agent")} className="rounded-xl bg-[#9C7434] px-4 py-2 font-semibold text-white">Approve{tier !== o.tier ? " (new package)" : ""}</button>
-            <button onClick={() => run(decide({ id: o._id, action: "decline", note: note || undefined }), "Declined")} className="rounded-xl bg-stone-100 px-4 py-2 font-semibold text-stone-700">Decline</button>
+          <FieldError msg={noteErr} />
+          <div className={`flex items-center gap-2 ${busy ? "pointer-events-none opacity-60" : ""}`}>
+            <button onClick={() => run(decide({ action: "approve", tier, note }), "Approved — kit sent to agent")} className="rounded-xl bg-[#9C7434] px-4 py-2 font-semibold text-white">Approve{tier !== o.tier ? " (new package)" : ""}</button>
+            <button onClick={() => confirm("Decline this order?") && run(decide({ action: "decline", note }), "Declined")} className="rounded-xl bg-stone-100 px-4 py-2 font-semibold text-stone-700">Decline</button>
+            {busy && <Loader2 className="size-4 animate-spin text-stone-400" />}
           </div>
         </div>
       )}
       {billable && (
-        <div className="mt-3 flex flex-wrap gap-2 text-sm">
-          {o.status === "approved" && <button onClick={() => run(setStatus({ id: o._id, status: "live" }), "Marked live — seller page shows Ads live")} className="rounded-lg bg-emerald-600 px-3 py-1.5 font-semibold text-white">Mark ads live</button>}
-          {o.status === "live" && <button onClick={() => run(setStatus({ id: o._id, status: "done" }), "Marked finished")} className="rounded-lg bg-stone-800 px-3 py-1.5 font-semibold text-white">Mark finished</button>}
+        <div className={`mt-3 flex flex-wrap items-center gap-2 text-sm ${busy ? "pointer-events-none opacity-60" : ""}`}>
+          {busy && <Loader2 className="size-4 animate-spin text-stone-400" />}
+          {o.status === "approved" && <button onClick={() => run(setStatus({ status: "live" }), "Marked live — seller page shows Ads live")} className="rounded-lg bg-emerald-600 px-3 py-1.5 font-semibold text-white">Mark ads live</button>}
+          {o.status === "live" && <button onClick={() => run(setStatus({ status: "done" }), "Marked finished")} className="rounded-lg bg-stone-800 px-3 py-1.5 font-semibold text-white">Mark finished</button>}
           {o.paymentStatus !== "paid" && o.paymentStatus !== "deducted" && (
             o.payment === "ahead"
-              ? <button onClick={() => run(setPayment({ id: o._id, paymentStatus: "paid" }), "Marked paid")} className="rounded-lg bg-[#0A0A0A] px-3 py-1.5 font-semibold text-white">Mark paid (Zelle/check)</button>
-              : <button onClick={() => run(setPayment({ id: o._id, paymentStatus: "deducted" }), "Marked deducted")} className="rounded-lg bg-[#0A0A0A] px-3 py-1.5 font-semibold text-white">Mark deducted at closing</button>
+              ? <button onClick={() => run(setPayment({ paymentStatus: "paid" }), "Marked paid")} className="rounded-lg bg-[#0A0A0A] px-3 py-1.5 font-semibold text-white">Mark paid (Zelle/check)</button>
+              : <button onClick={() => run(setPayment({ paymentStatus: "deducted" }), "Marked deducted")} className="rounded-lg bg-[#0A0A0A] px-3 py-1.5 font-semibold text-white">Mark deducted at closing</button>
           )}
           {o.payment === "closing" && o.paymentStatus === "unpaid" && (
-            <button onClick={() => run(setPayment({ id: o._id, paymentStatus: "rolled", note: "Listing didn't close" }), "Carried to next closing")} className="rounded-lg bg-stone-100 px-3 py-1.5 font-semibold text-stone-700">Didn't close → next closing</button>
+            <button onClick={() => run(setPayment({ paymentStatus: "rolled", note: "Listing didn't close" }), "Carried to next closing")} className="rounded-lg bg-stone-100 px-3 py-1.5 font-semibold text-stone-700">Didn't close → next closing</button>
           )}
           {(o.paymentStatus === "paid" || o.paymentStatus === "deducted") && (
-            <button onClick={() => run(setPayment({ id: o._id, paymentStatus: "unpaid", note: "Undo" }), "Back to unpaid")} className="text-stone-500 underline">Undo payment</button>
+            <button onClick={() => run(setPayment({ paymentStatus: "unpaid", note: "Undo" }), "Back to unpaid")} className="text-stone-500 underline">Undo payment</button>
           )}
         </div>
       )}
@@ -78,8 +89,8 @@ function OrderCard({ o }: { o: Order }) {
 }
 
 function Ledger() {
-  const q = useQuery(api.adOrders.queue);
-  if (!q) return <div className="h-32 animate-pulse rounded-2xl bg-stone-100" />;
+  const { data: q, error, reload } = useQueue();
+  if (!q) return error ? <LoadError error={error} onRetry={() => void reload()} what="the ledger" /> : <Skeleton label="Loading ledger" rows={2} />;
   const t = q.ledger.totals;
   return (
     <div className="space-y-3">
@@ -117,17 +128,19 @@ function Ledger() {
 }
 
 function Prices() {
-  const cfg = useQuery(api.adOrders.config);
-  const save = useMutation(api.adOrders.savePricing);
+  const { data: cfg, error, reload } = useConfig();
   const [draft, setDraft] = useState<Record<string, number> | null>(null);
-  if (!cfg) return null;
+  const [busy, setBusy] = useState(false);
+  if (!cfg) return error ? <LoadError error={error} onRetry={() => void reload()} what="prices" /> : <Skeleton label="Loading prices" rows={2} />;
   const p = cfg.pricing;
   const init: Record<string, number> = { ohSpend: p.openHouse.spend, ohFee: p.openHouse.fee, closingSurcharge: p.closingSurcharge };
   p.tiers.forEach(t => { init[`${t.key}.spend`] = t.spend; init[`${t.key}.fee`] = t.fee; });
   const d = draft ?? init;
+  const bad = (k: string) => !Number.isInteger(d[k]) || d[k] < 0 || d[k] > 50_000;
   const field = (k: string, label: string) => (
     <label className="block text-sm text-stone-600">{label}
-      <input type="number" min={0} value={d[k]} onChange={e => setDraft({ ...d, [k]: Number(e.target.value) })} className="mt-1 w-full rounded-lg border border-stone-200 bg-white px-2 py-1.5 text-[15px] text-[#0A0A0A]" />
+      <input inputMode="numeric" value={Number.isFinite(d[k]) ? String(d[k]) : ""} onChange={e => { const v = e.target.value.replace(/\D/g, "").slice(0, 5); setDraft({ ...d, [k]: v === "" ? Number.NaN : Number(v) }); }} aria-invalid={bad(k)} className={`mt-1 w-full rounded-lg border bg-white px-2 py-1.5 text-[15px] text-[#0A0A0A] ${bad(k) ? "border-red-400" : "border-stone-200"}`} />
+      <FieldError msg={bad(k) ? "Enter whole dollars, 0 to 50,000." : undefined} />
     </label>
   );
   return (
@@ -147,16 +160,20 @@ function Prices() {
         {field("closingSurcharge", "Pay-at-closing surcharge")}
       </div>
       <button
-        onClick={() => save({ tiers: p.tiers.map(t => ({ key: t.key, spend: d[`${t.key}.spend`], fee: d[`${t.key}.fee`] })), ohSpend: d.ohSpend, ohFee: d.ohFee, closingSurcharge: d.closingSurcharge })
-          .then(() => { setDraft(null); toast.success("Prices saved"); }).catch(e => toast.error(errMsg(e)))}
-        className="rounded-xl bg-[#9C7434] px-4 py-2 font-semibold text-white">Save prices</button>
+        disabled={busy || Object.keys(d).some(bad)}
+        onClick={() => {
+          setBusy(true);
+          adOrdersApi.savePricing({ tiers: p.tiers.map(t => ({ key: t.key, spend: d[`${t.key}.spend`], fee: d[`${t.key}.fee`] })), ohSpend: d.ohSpend, ohFee: d.ohFee, closingSurcharge: d.closingSurcharge })
+            .then(() => { setDraft(null); toast.success("Prices saved"); }).catch(e => toast.error(errMsg(e))).finally(() => setBusy(false));
+        }}
+        className="inline-flex items-center gap-2 rounded-xl bg-[#9C7434] px-4 py-2 font-semibold text-white disabled:opacity-50">{busy && <Loader2 className="size-4 animate-spin" />}{busy ? "Saving…" : "Save prices"}</button>
       <p className="text-sm text-stone-500">New prices apply to new orders. Existing orders keep the price the agent authorized.</p>
     </div>
   );
 }
 
 function AdminView() {
-  const q = useQuery(api.adOrders.queue);
+  const { data: q, error, reload } = useQueue();
   const [tab, setTab] = useState<"orders" | "ledger" | "prices">("orders");
   const pending = q?.orders.filter(o => o.status === "requested").length ?? 0;
   return (
@@ -167,8 +184,8 @@ function AdminView() {
         ))}
       </div>
       {tab === "orders" && (
-        !q ? <div className="h-32 animate-pulse rounded-2xl bg-stone-100" /> :
-        q.orders.length === 0 ? <p className="text-stone-500">No ad orders yet. Agents order from a listing's “Ads & web” tab.</p> :
+        !q ? (error ? <LoadError error={error} onRetry={() => void reload()} what="ad orders" /> : <Skeleton label="Loading ad orders" rows={3} />) :
+        q.orders.length === 0 ? <EmptyState icon={<Megaphone className="size-8" />} title="No ad orders yet">Agents order ads from a listing's “Ads & web” tab. New orders show up here to approve.</EmptyState> :
         <ul className="space-y-2">{[...q.orders].sort((a, b) => Number(b.status === "requested") - Number(a.status === "requested")).map(o => <OrderCard key={o._id} o={o as Order} />)}</ul>
       )}
       {tab === "ledger" && <Ledger />}
@@ -178,8 +195,8 @@ function AdminView() {
 }
 
 function AgentView() {
-  const q = useQuery(api.adOrders.mine);
-  if (!q) return <div className="h-32 animate-pulse rounded-2xl bg-stone-100" />;
+  const { data: q, error, reload } = useApiData("ad-orders:mine", () => adOrdersApi.mine());
+  if (!q) return error ? <LoadError error={error} onRetry={() => void reload()} what="your ad orders" /> : <Skeleton label="Loading your ad orders" rows={2} />;
   return (
     <div className="space-y-3">
       {q.ledger && (
@@ -188,17 +205,17 @@ function AgentView() {
           <div className="rounded-2xl bg-white p-3 ring-1 ring-black/5"><div className="font-display text-2xl">{money(q.ledger.owedAhead)}</div><div className="text-sm text-stone-500">To pay by Zelle/check</div></div>
         </div>
       )}
-      {q.orders.length === 0 ? <p className="text-stone-500">No ad orders yet. Open a listing → “Ads & web” → Order ads.</p> : (
+      {q.orders.length === 0 ? <EmptyState icon={<Megaphone className="size-8" />} title="No ad orders yet">Open a listing → “Ads & web” → Order ads.</EmptyState> : (
         <ul className="space-y-2">
           {q.orders.map(o => (
             <li key={o._id} className="rounded-2xl bg-white p-4 ring-1 ring-black/5">
               <div className="flex items-start justify-between gap-2">
-                <Link to={`/listings/${o.listingId}`} className="font-semibold hover:underline">{o.address.split(",")[0]}</Link>
+                {o.listingId ? <Link to={`/listings/${o.listingId}`} className="font-semibold hover:underline">{o.address.split(",")[0]}</Link> : <span className="font-semibold">{o.address.split(",")[0]}</span>}
                 <StatusTag s={o.status} />
               </div>
               <div className="text-[15px] text-stone-600">{o.tierName}{o.openHouse ? " + open house" : ""} · {money(o.total)} · {o.payment === "ahead" ? "pay ahead" : "at closing"} · {PAY_STATUS[o.paymentStatus]}</div>
               {o.payment === "ahead" && o.paymentStatus === "unpaid" && ["approved", "live", "done"].includes(o.status) && (
-                <div className="mt-2"><PayByCard kind="ad" id={o._id} amount={o.total} after="It's marked paid as soon as the card goes through." /></div>
+                <p className="mt-2 text-[15px] text-stone-600">Please send {money(o.total)} by Zelle or check. An admin marks it paid.</p>
               )}
             </li>
           ))}
@@ -209,14 +226,14 @@ function AgentView() {
 }
 
 export function AdOrdersPage() {
-  const cfg = useQuery(api.adOrders.config);
+  const { data: cfg, error, reload } = useConfig();
   return (
     <div className="space-y-4">
       <div>
         <h1 className="font-display text-2xl sm:text-3xl">Listing ad orders</h1>
         <p className="text-stone-600">{cfg?.isAdmin ? "Approve agent ad orders, track what each agent owes, and set package prices." : "Your ad orders and what you owe."}</p>
       </div>
-      {cfg === undefined ? null : cfg.isAdmin ? <AdminView /> : <AgentView />}
+      {cfg === undefined ? (error ? <LoadError error={error} onRetry={() => void reload()} what="ad orders" /> : <Skeleton label="Loading ad orders" rows={2} />) : cfg.isAdmin ? <AdminView /> : <AgentView />}
     </div>
   );
 }

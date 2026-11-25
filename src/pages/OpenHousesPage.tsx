@@ -57,7 +57,7 @@ export function OpenHousesPage() {
   if (!d) return (
     <div className="mx-auto max-w-2xl space-y-4 pb-6" data-testid="oh-page">
       <PageHead title="Open house calendar" sub="Host an open house on a team listing to meet buyers. Grab an open slot, or add your own." />
-      {error ? <LoadError error={error} onRetry={() => void reload()} what="the open house calendar" /> : <Skeleton rows={3} className="h-28" />}
+      {error ? <LoadError error={error} onRetry={() => void reload()} what="the open house calendar" /> : <Skeleton label="Loading open house calendar" rows={3} className="h-28" />}
     </div>
   );
   const slots = d.slots.filter(s => !onlyMine || s.mine);
@@ -151,7 +151,9 @@ export function OpenHousesPage() {
 
       {days.length === 0 && (
         <EmptyState icon={<CalendarDays className="size-8" />} title={onlyMine ? "You're not hosting any open houses yet" : "No open houses on the calendar yet"}
-          action={!open && <button type="button" className={btnGold} onClick={() => setOpen(true)}><CalendarPlus className="size-[18px]" /> Add an open house</button>}>
+          action={onlyMine && d.slots.length > 0
+            ? <button type="button" className={btnLight} onClick={() => setOnlyMine(false)}>Show full calendar</button>
+            : !open && <button type="button" className={btnGold} onClick={() => setOpen(true)}><CalendarPlus className="size-[18px]" /> Add an open house</button>}>
           {onlyMine ? "Grab an open slot from the full calendar, or add your own." : "Add the first one, or ask the listing agents when they're holding one."}
         </EmptyState>
       )}

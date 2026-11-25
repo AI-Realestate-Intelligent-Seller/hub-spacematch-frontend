@@ -1,6 +1,7 @@
 // Shared bits for forms and data on the new backend: field errors, loading skeletons,
 // load errors with "Try again", and empty states.
 import type { ReactNode } from "react";
+import { Skeleton as Placeholder } from "@/components/ui/skeleton";
 import { apiErrorMessage } from "@/lib/apiData";
 
 /** Red message under a field. */
@@ -10,11 +11,17 @@ export const FieldError = ({ msg, id }: { msg?: string; id?: string }) =>
 /** Classes that turn a field's border red when it has an error. */
 export const errorBorder = (err?: string) => (err ? "border-red-400! focus:border-red-500! focus:ring-red-500/20!" : "");
 
-/** Grey placeholder blocks while data loads. */
-export function Skeleton({ rows = 3, className = "h-28", grid = "" }: { rows?: number; className?: string; grid?: string }) {
+/** Placeholder cards while a section loads. */
+export function Skeleton({ rows = 3, className = "h-28", grid = "", label = "Loading" }: { rows?: number; className?: string; grid?: string; label?: string }) {
   return (
-    <div className={grid || "space-y-3"} role="status" aria-busy="true" aria-label="Loading">
-      {Array.from({ length: rows }, (_, i) => <div key={i} className={`animate-pulse rounded-2xl bg-stone-100 ${className}`} />)}
+    <div className={grid || "space-y-3"} role="status" aria-busy="true" aria-label={label}>
+      {Array.from({ length: rows }, (_, i) => (
+        <div key={i} className={`space-y-2 rounded-2xl bg-white p-3 ring-1 ring-[#ebe5da] ${className}`} aria-hidden="true">
+          <Placeholder className="h-4 w-2/5 bg-stone-200" />
+          <Placeholder className="h-3 w-4/5 bg-stone-200" />
+          <Placeholder className="h-3 w-3/5 bg-stone-200" />
+        </div>
+      ))}
     </div>
   );
 }

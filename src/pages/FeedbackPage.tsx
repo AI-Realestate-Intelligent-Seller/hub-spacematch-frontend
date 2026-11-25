@@ -286,7 +286,7 @@ export function FeedbackPage() {
   if (!data) return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center gap-3"><Lightbulb className="size-7 text-[#9C7434]" /><h1 className="font-['Playfair_Display'] text-3xl font-bold">Suggest a fix or add-on</h1></div>
-      {error ? <LoadError error={error} onRetry={() => void reload()} what="the ideas" /> : <Skeleton rows={3} className="h-28" />}
+      {error ? <LoadError error={error} onRetry={() => void reload()} what="the ideas" /> : <Skeleton label="Loading ideas" rows={3} className="h-28" />}
     </div>
   );
   const ideas = data.items
@@ -332,8 +332,8 @@ export function FeedbackPage() {
             <div className="space-y-3">
               {ideas.length === 0 ? (
                 <div className="p-3">
-                  <EmptyState icon={<MessageSquarePlus className="size-8" />} title={filter === "mine" ? "You haven't posted an idea yet" : filter === "shipped" ? "Nothing live yet" : "No ideas here yet"}>
-                    {filter === "shipped" ? "Ideas show up here once they're built." : "Use the form above to suggest a fix or an add-on. Be the first."}
+                  <EmptyState icon={<MessageSquarePlus className="size-8" />} title={filter === "mine" ? "You haven't posted an idea yet" : filter === "shipped" ? "Nothing live yet" : filter === "open" ? "No open ideas" : "No ideas yet"}>
+                    {filter === "shipped" ? "Ideas show up here once they're built." : "Use the form above to suggest a fix or an add-on."}
                   </EmptyState>
                 </div>
               ) : ideas.map(r => <IdeaRow key={r._id} r={r} isAdmin={data.isAdmin} />)}

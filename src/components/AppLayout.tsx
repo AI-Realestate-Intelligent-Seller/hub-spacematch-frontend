@@ -21,6 +21,8 @@ import {
 import { useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router";
 import { api } from "../../convex/_generated/api";
+import { useApiData } from "@/lib/apiData";
+import { adOrdersApi } from "@/lib/listingsApi";
 import { areaOf } from "../lib/adoptionAreas";
 import { AREAS, areaFor } from "../lib/areas";
 import { recordToolUse } from "../lib/catalog";
@@ -64,7 +66,7 @@ function useAdoptionPing(path: string) {
 function UserMenu() {
   const user = useCurrentUser(); // new backend session
   const me = useQuery(api.hubMe.me);
-  const adPending = useQuery(api.adOrders.config)?.pending ?? 0;
+  const adPending = useApiData("ad-orders:config", () => adOrdersApi.config(), { pollMs: 120_000 }).data?.pending ?? 0; // new backend
   const reelConfirm = useQuery(api.reelOrders.config)?.toConfirm ?? 0;
   const listConfirm = useQuery(api.sellerLists.config, {})?.toConfirm ?? 0;
   const { signOut } = useSession(); // new backend: clears the session cookie

@@ -1,5 +1,6 @@
-import { useMutation, useQuery } from "convex/react";
 import { SCHOOL_OPTIONS, SCHOOLS_HINT } from "@/lib/cmaSchools";
+import { useApiData } from "@/lib/apiData";
+import { CMA_TYPING, MAX_UPLOAD_MB, cmaApi, cmaErrorMessage, cmaFieldProblems } from "@/lib/cmaApi";
 import {
   Building2,
   CheckCircle2,
@@ -40,8 +41,6 @@ import {
 import { AGENTS } from "@/lib/agents";
 import { ListingPicker, type PickedListing } from "@/components/hub/ListingPicker";
 import { VoiceFill, type VoiceResult } from "@/components/hub/VoiceFill";
-import { api } from "../../convex/_generated/api";
-import type { Id } from "../../convex/_generated/dataModel";
 
 const UPGRADE_ITEMS = [
   "Kitchen remodel",
@@ -151,7 +150,7 @@ const emptyCommercial = {
 type CommercialState = typeof emptyCommercial;
 type Kind = "residential" | "commercial";
 
-const MAX_FILE_MB = 100;
+const MAX_FILE_MB = MAX_UPLOAD_MB; // Supabase free plan: 50 MB per file
 const fmtSize = (n: number) =>
   n > 1024 * 1024
     ? `${(n / 1024 / 1024).toFixed(1)} MB`
@@ -290,15 +289,14 @@ const VOICE_APPEND: (keyof FormState)[] = ["otherUpgrades", "knownIssues", "comp
 
 export function NewRequestPage() {
   const { id: editParam } = useParams();
-  const editId = editParam as Id<"cmaRequests"> | undefined;
+  const editId = editParam;
   const navigate = useNavigate();
-  const existing = useQuery(api.cma.get, editId ? { id: editId } : "skip");
-  const me = useQuery(api.cma.me);
-  const submit = useMutation(api.cma.submit);
-  const update = useMutation(api.cma.update);
+  const existingRes = useApiData(editId ? `cma:${editId}` : null, () => cmaApi.get(editId!));
+  // undefined = loading, null = not found
+  const existing = existingRes.notFound ? null : existingRes.data;
+  const me = useApiData("cma:me", () => cmaApi.me()).data;
   const [kept, setKept] = useState<SavedAttachment[]>([]);
   const prefilled = useRef(false);
-  const generateUploadUrl = useMutation(api.cma.generateUploadUrl);
   const [kind, setKind] = useState<Kind>("residential");
   const [form, setForm] = useState<FormState>(emptyForm);
   const [com, setCom] = useState<CommercialState>(emptyCommercial);
@@ -315,8 +313,11 @@ export function NewRequestPage() {
     setForm(f => ({ ...f, [k]: v }));
   const setInput =
     (k: keyof FormState) =>
-    (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
-      setForm(f => ({ ...f, [k]: e.target.value }));
+    (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      // Number / ZIP / phone fields only take the characters they allow.
+      const value = (CMA_TYPING[k] ?? (v => v))(e.target.value);
+      setForm(f => ({ ...f, [k]: value }));
+    };
 
   // Edit mode: load the saved request into the form once.
   useEffect(() => {
@@ -329,7 +330,7 @@ export function NewRequestPage() {
       Object.fromEntries(
         Object.keys(emptyForm).map(k => [
           k,
-          str((r as Record<string, unknown>)[k]) ||
+          str((r as unknown as Record<string, unknown>)[k]) ||
             (k === "state" || k === "branding" || k === "propertyType"
               ? emptyForm[k as keyof FormState]
               : ""),
@@ -525,20 +526,7 @@ export function NewRequestPage() {
     }[] = [];
     for (const [i, f] of files.entries()) {
       setUploadMsg(`Uploading ${i + 1} of ${files.length}: ${f.name}`);
-      const url = await generateUploadUrl();
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": f.type || "application/octet-stream" },
-        body: f,
-      });
-      if (!res.ok) throw new Error(`Upload failed for ${f.name}`);
-      const { storageId } = (await res.json()) as { storageId: string };
-      out.push({
-        storageId,
-        name: f.name,
-        size: f.size,
-        contentType: f.type || undefined,
-      });
+      out.push(await cmaApi.upload(f));
     }
     setUploadMsg("");
     return out;
@@ -594,6 +582,11 @@ export function NewRequestPage() {
     }
     if (missing.length) {
       toast.error(`Please fill in: ${missing.join(", ")}`);
+      return;
+    }
+    const problems = cmaFieldProblems(form);
+    if (problems.length) {
+      toast.error(problems.slice(0, 3).join(" "));
       return;
     }
     setSubmitting(true);
@@ -660,7 +653,7 @@ export function NewRequestPage() {
         notes: opt(clean.notes),
       };
       if (editId) {
-        const res = await update({ id: editId, ...payload });
+        const res = await cmaApi.update(editId, payload);
         if (!res.changed.length) {
           toast.info("No changes to save");
           navigate("/requests");
@@ -676,11 +669,12 @@ export function NewRequestPage() {
         navigate("/requests");
         return;
       }
-      const id = await submit(payload);
-      setDone(id);
+      const created = await cmaApi.submit(payload);
+      setDone(created._id);
+      if (created.status === "approval") toast.info(created.statusNote ?? "Over the monthly limit: sent to an admin for approval.");
       window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Could not submit");
+      toast.error(cmaErrorMessage(err));
     } finally {
       setSubmitting(false);
       setUploadMsg("");

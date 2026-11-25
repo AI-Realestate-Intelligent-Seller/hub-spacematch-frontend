@@ -1,4 +1,3 @@
-import { useMutation, useQuery } from "convex/react";
 import {
   DollarSign,
   Download,
@@ -8,6 +7,9 @@ import {
   Plus,
 } from "lucide-react";
 import { useState } from "react";
+import { LoadError } from "@/components/hub/FormState";
+import { useApiData } from "@/lib/apiData";
+import { cmaApi, cmaErrorMessage } from "@/lib/cmaApi";
 import { Link } from "react-router";
 import { formatAddress } from "../../convex/address";
 import { toast } from "sonner";
@@ -26,8 +28,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
-import { api } from "../../convex/_generated/api";
-import type { Id } from "../../convex/_generated/dataModel";
 
 const STATUS: Record<string, { label: string; cls: string }> = {
   submitted: { label: "Queued", cls: "bg-stone-200 text-stone-800" },
@@ -54,7 +54,7 @@ const money = (n?: number, lease?: "residential" | "commercial") =>
           : "");
 
 type PriceTarget = {
-  id: Id<"cmaRequests">;
+  id: string;
   // Lease CMAs price rent: residential $/mo, commercial $/SF/yr.
   lease?: "residential" | "commercial";
   address: string;
@@ -82,7 +82,6 @@ function ListPriceDialog({
   target: PriceTarget | null;
   onClose: () => void;
 }) {
-  const setListPrice = useMutation(api.cma.setListPrice);
   const [price, setPrice] = useState("");
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
@@ -100,11 +99,7 @@ function ListPriceDialog({
     if (!target || !valid) return;
     setSaving(true);
     try {
-      await setListPrice({
-        id: target.id,
-        listPrice: n,
-        note: note || undefined,
-      });
+      await cmaApi.setListPrice(target.id, n, note.trim().slice(0, 500) || undefined);
       toast.success(
         `${L ? "Asking rent" : "List price"} saved. Viktor is updating the PDF and workbook.`,
       );
@@ -112,7 +107,7 @@ function ListPriceDialog({
       setNote("");
       onClose();
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Could not save");
+      toast.error(cmaErrorMessage(e));
     } finally {
       setSaving(false);
     }
@@ -218,8 +213,8 @@ const lz = (r: { reportType?: string; kind?: string }) =>
     : undefined;
 
 export function RequestsPage() {
-  const rows = useQuery(api.cma.list);
-  const me = useQuery(api.cma.me);
+  const { data: rows, error, reload } = useApiData("cma:list", () => cmaApi.list(), { pollMs: 60_000 });
+  const me = useApiData("cma:me", () => cmaApi.me()).data;
   const [priceTarget, setPriceTarget] = useState<PriceTarget | null>(null);
 
   return (
@@ -245,7 +240,9 @@ export function RequestsPage() {
         </div>
       </div>
 
-      {rows === undefined ? (
+      {rows === undefined && error ? (
+        <LoadError error={error} onRetry={() => void reload()} what="your CMA requests" />
+      ) : rows === undefined ? (
         <div className="space-y-3">
           <Skeleton className="h-24" />
           <Skeleton className="h-24" />

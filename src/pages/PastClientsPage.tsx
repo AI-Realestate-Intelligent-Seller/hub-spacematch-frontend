@@ -50,7 +50,7 @@ export function PastClientsPage() {
   if (!rows) return (
     <div className="mx-auto max-w-2xl space-y-4 pb-6" data-testid="pc-page">
       <PageHead title="Past clients" sub="Add the people you've helped. Each month you see who to text and what to say." />
-      {error ? <LoadError error={error} onRetry={() => void reload()} what="your past clients" /> : <Skeleton rows={3} className="h-28" />}
+      {error ? <LoadError error={error} onRetry={() => void reload()} what="your past clients" /> : <Skeleton label="Loading past clients" rows={3} className="h-28" />}
     </div>
   );
   const agentFirst = user?.name.split(/\s+/)[0] || "your agent";

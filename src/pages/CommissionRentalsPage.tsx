@@ -444,7 +444,7 @@ export function CommissionRentalsPage() {
         {LISTS.map(l => (
           <button key={l.id} type="button" role="tab" aria-selected={list === l.id} data-testid={`list-${l.id}`} onClick={() => pickList(l.id)}
             className={`flex items-center justify-center gap-1.5 rounded-xl px-3 py-2.5 text-[15px] font-semibold ${list === l.id ? "bg-white text-[#0A0A0A] shadow-sm" : "text-stone-600"}`}>
-            {l.id === "nopay" && <Ban className="size-4 text-red-800" />}{l.label} <span className="font-normal opacity-60">{listCount[l.id]}</span>
+            {l.id === "nopay" && <Ban className="size-4 text-red-800" />}{l.label} {data && <span className="font-normal opacity-60">{listCount[l.id]}</span>}
           </button>
         ))}
       </div>
@@ -463,7 +463,7 @@ export function CommissionRentalsPage() {
       <div className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1">
         {FILTERS.filter(f => !(nopay && f.id === "over")).map(f => (
           <button key={f.id} type="button" data-testid={`filter-${f.id}`} onClick={() => setFilter(f.id)} className={`shrink-0 rounded-full px-3.5 py-1.5 text-sm ring-1 ${filter === f.id ? "bg-[#0A0A0A] text-white ring-[#0A0A0A]" : "bg-white text-stone-700 ring-stone-200"}`}>
-            {nopay && f.id === "verified" ? "Confirmed" : f.label} <span className="opacity-60">{counts[f.id]}</span>
+            {nopay && f.id === "verified" ? "Confirmed" : f.label} {data && <span className="opacity-60">{counts[f.id]}</span>}
           </button>
         ))}
       </div>
@@ -471,7 +471,7 @@ export function CommissionRentalsPage() {
       {data === undefined && error ? (
         <LoadError error={error} onRetry={() => void reload()} what="the buildings" />
       ) : data === undefined ? (
-        <Skeleton rows={6} className="h-64" grid="grid gap-3 sm:grid-cols-2 lg:grid-cols-3" />
+        <Skeleton label="Loading commission rental buildings" rows={6} className="h-36" grid="grid gap-3 sm:grid-cols-2 lg:grid-cols-3" />
       ) : shown.length === 0 ? (
         all.length === 0 ? (
           <EmptyState icon={nopay ? <Ban className="size-8" /> : <Building2 className="size-8" />} title={nopay ? "Nothing on this list yet" : "No buildings yet"}

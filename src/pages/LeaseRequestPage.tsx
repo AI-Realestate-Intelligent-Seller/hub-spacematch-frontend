@@ -1,5 +1,6 @@
-import { useMutation, useQuery } from "convex/react";
 import { SCHOOL_OPTIONS, SCHOOLS_HINT } from "@/lib/cmaSchools";
+import { useApiData } from "@/lib/apiData";
+import { CMA_TYPING, MAX_UPLOAD_MB, cmaApi, cmaErrorMessage, cmaFieldProblems } from "@/lib/cmaApi";
 import {
   Building2,
   CheckCircle2,
@@ -24,8 +25,6 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { AGENTS } from "@/lib/agents";
-import { api } from "../../convex/_generated/api";
-import type { Id } from "../../convex/_generated/dataModel";
 import { Choice, Field } from "./NewRequestPage";
 import { VoiceFill, type VoiceResult } from "@/components/hub/VoiceFill";
 
@@ -137,7 +136,7 @@ const BRANDING = [
   "SpaceMatch only (no brokerage)",
 ];
 
-const MAX_FILE_MB = 100;
+const MAX_FILE_MB = MAX_UPLOAD_MB; // Supabase free plan: 50 MB per file
 const fmtSize = (n: number) =>
   n > 1024 * 1024
     ? `${(n / 1024 / 1024).toFixed(1)} MB`
@@ -285,13 +284,12 @@ type SavedAttachment = {
 
 export function LeaseRequestPage() {
   const { id: editParam } = useParams();
-  const editId = editParam as Id<"cmaRequests"> | undefined;
+  const editId = editParam;
   const navigate = useNavigate();
-  const existing = useQuery(api.cma.get, editId ? { id: editId } : "skip");
-  const me = useQuery(api.cma.me);
-  const submit = useMutation(api.cma.submit);
-  const update = useMutation(api.cma.update);
-  const generateUploadUrl = useMutation(api.cma.generateUploadUrl);
+  const existingRes = useApiData(editId ? `cma:${editId}` : null, () => cmaApi.get(editId!));
+  // undefined = loading, null = not found
+  const existing = existingRes.notFound ? null : existingRes.data;
+  const me = useApiData("cma:me", () => cmaApi.me()).data;
   const [kind, setKind] = useState<Kind>("residential");
   const [form, setForm] = useState<FormState>(emptyForm);
   const [lease, setLease] = useState<LeaseState>(emptyLease);
@@ -307,14 +305,19 @@ export function LeaseRequestPage() {
     setForm(f => ({ ...f, [k]: v }));
   const setInput =
     (k: keyof FormState) =>
-    (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
-      setForm(f => ({ ...f, [k]: e.target.value }));
+    (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      // Number / ZIP / phone fields only take the characters they allow.
+      const value = (CMA_TYPING[k] ?? (v => v))(e.target.value);
+      setForm(f => ({ ...f, [k]: value }));
+    };
   const setL = (k: keyof LeaseState) => (v: string) =>
     setLease(l => ({ ...l, [k]: v }));
   const setLInput =
     (k: keyof LeaseState) =>
-    (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
-      setLease(l => ({ ...l, [k]: e.target.value }));
+    (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      const value = (CMA_TYPING[k] ?? (v => v))(e.target.value);
+      setLease(l => ({ ...l, [k]: value }));
+    };
 
   useEffect(() => {
     if (!existing || prefilled.current) return;
@@ -485,20 +488,7 @@ export function LeaseRequestPage() {
     const out: SavedAttachment[] = [];
     for (const [i, f] of files.entries()) {
       setUploadMsg(`Uploading ${i + 1} of ${files.length}: ${f.name}`);
-      const url = await generateUploadUrl();
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": f.type || "application/octet-stream" },
-        body: f,
-      });
-      if (!res.ok) throw new Error(`Upload failed for ${f.name}`);
-      const { storageId } = (await res.json()) as { storageId: string };
-      out.push({
-        storageId,
-        name: f.name,
-        size: f.size,
-        contentType: f.type || undefined,
-      });
+      out.push(await cmaApi.upload(f));
     }
     setUploadMsg("");
     return out;
@@ -516,6 +506,12 @@ export function LeaseRequestPage() {
     if (!form.condition) missing.push("condition");
     if (missing.length) {
       toast.error(`Please fill in: ${missing.join(", ")}`);
+      return;
+    }
+    // Same format checks as the backend (lease beds/sqft/year live in the lease section).
+    const problems = cmaFieldProblems({ ...form, ...lease });
+    if (problems.length) {
+      toast.error(problems.slice(0, 3).join(" "));
       return;
     }
     setSubmitting(true);
@@ -602,7 +598,7 @@ export function LeaseRequestPage() {
         notes: opt(clean.notes),
       };
       if (editId) {
-        const res = await update({ id: editId, ...payload });
+        const res = await cmaApi.update(editId, payload);
         toast.success(
           !res.changed.length
             ? "No changes to save"
@@ -613,11 +609,12 @@ export function LeaseRequestPage() {
         navigate("/requests");
         return;
       }
-      const id = await submit(payload);
-      setDone(id);
+      const created = await cmaApi.submit(payload);
+      setDone(created._id);
+      if (created.status === "approval") toast.info(created.statusNote ?? "Over the monthly limit: sent to an admin for approval.");
       window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Could not submit");
+      toast.error(cmaErrorMessage(err));
     } finally {
       setSubmitting(false);
       setUploadMsg("");

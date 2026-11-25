@@ -3,7 +3,8 @@ import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router";
 import { toast } from "sonner";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { EmptyState, FieldError, LoadError, Skeleton, errorBorder } from "@/components/hub/FormState";
+import { Skeleton } from "@/components/ui/skeleton";
+import { EmptyState, FieldError, LoadError, errorBorder } from "@/components/hub/FormState";
 import { apiErrorMessage, fieldErrors, useApiData } from "@/lib/apiData";
 import { check, fieldRules, orNull, typeEmail, typePhone } from "@/lib/formRules";
 import { smsHref, telHref } from "@/lib/hub";
@@ -237,17 +238,30 @@ export function ResourcesPage() {
         <Search className="size-4 text-stone-400" />
         <input value={q} onChange={e => setQ(e.target.value.slice(0, 100))} placeholder="Search name, type, area, language…" aria-label="Search vendors" className="w-full bg-transparent outline-none" />
       </div>
-      <div className="-mx-4 px-4 flex gap-2 overflow-x-auto pb-1">
+      <div className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {["All", ...CATEGORIES].map(c => (
           <button key={c} type="button" onClick={() => setParams(c === "All" ? {} : { cat: c })} className={`shrink-0 rounded-full px-3.5 py-1.5 text-sm ring-1 ${cat === c ? "bg-[#0A0A0A] text-white ring-[#0A0A0A]" : "bg-white text-stone-600 ring-stone-200"}`}>
             {c}{c !== "All" && counts[c] ? <span className="opacity-60"> {counts[c]}</span> : null}
           </button>
         ))}
       </div>
-      {data === undefined && error ? (
-        <LoadError error={error} onRetry={() => void reload()} what="vendors" />
+      {data === undefined && !error ? (
+        <div role="status" aria-label="Loading vendors" aria-busy="true" className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {Array.from({ length: 6 }, (_, index) => (
+            <div key={index} className="space-y-3 rounded-2xl bg-white p-4 ring-1 ring-[#ebe5da]" aria-hidden="true">
+              <Skeleton className="h-6 w-2/3 bg-stone-200" />
+              <Skeleton className="h-4 w-1/2 bg-stone-200" />
+              <Skeleton className="h-4 w-full bg-stone-200" />
+              <Skeleton className="h-4 w-4/5 bg-stone-200" />
+              <div className="flex gap-2 pt-2">
+                <Skeleton className="h-10 w-16 rounded-xl bg-stone-200" />
+                <Skeleton className="h-10 w-16 rounded-xl bg-stone-200" />
+              </div>
+            </div>
+          ))}
+        </div>
       ) : data === undefined ? (
-        <Skeleton rows={6} className="h-52" grid="grid gap-3 sm:grid-cols-2 lg:grid-cols-3" />
+        <LoadError error={error} onRetry={() => void reload()} what="vendors" />
       ) : vendors.length === 0 ? (
         <EmptyState icon={<Store className="size-8" />} title="No vendors yet"
           action={<button type="button" onClick={() => setEditing({ d: { ...empty } })} className="inline-flex items-center gap-1.5 rounded-xl bg-[#9C7434] px-4 py-2.5 text-sm font-semibold text-white"><Plus className="size-4" />Add the first vendor</button>}>

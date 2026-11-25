@@ -1,5 +1,5 @@
 // Neighborhood & marketing plan for one listing (Michael 2026-11-08).
-import { useMutation, useQuery } from "convex/react";
+import { useMutation } from "convex/react";
 import { ArrowLeft, Check, Copy, ExternalLink, Loader2, Printer, RefreshCw, ShieldCheck, Sparkles } from "lucide-react";
 import { useState } from "react";
 import { Link, useParams } from "react-router";
@@ -8,6 +8,9 @@ import { api } from "../../convex/_generated/api";
 import type { Doc, Id } from "../../convex/_generated/dataModel";
 import { formatFreeAddress, formatPrice } from "../../convex/address";
 import { ago, errMsg, inputCls } from "./ListingsPage";
+import { EmptyState, Skeleton } from "@/components/hub/FormState";
+import { supportsLegacyListing } from "@/lib/listingsApi";
+import { useLegacyQuery } from "@/auth/convexClient";
 
 type Src = { name: string; url: string };
 export type Plan = {
@@ -171,9 +174,14 @@ export function PlanBuilder({ listingId, plan, buildsLeft, compact }: { listingI
 
 export function ListingPlanPage() {
   const { id } = useParams();
-  const data = useQuery(api.listingPlans.forListing, id ? { listingId: id as Id<"listings"> } : "skip");
+  const available = !!id && supportsLegacyListing(id);
+  const data = useLegacyQuery(api.listingPlans.forListing, available ? { listingId: id as Id<"listings"> } : "skip");
   const [checked, setChecked] = useState<Record<number, boolean>>({});
-  if (data === undefined) return <div className="h-40 animate-pulse rounded-2xl bg-stone-100" />;
+  if (!available || data instanceof Error) return (
+    <EmptyState icon={<Sparkles className="size-8" />} title="Marketing plan unavailable"
+      action={<Link to={id ? `/listings/${id}` : "/listings"} className="font-semibold text-[#7a5a26] underline">Back to {id ? "listing" : "listings"}</Link>} />
+  );
+  if (data === undefined) return <Skeleton label="Loading marketing plan" rows={2} />;
   const { listing: l, plan: row, buildsLeft, prompt } = data;
   const p = (row?.plan ?? null) as Plan | null;
   const facts = (row?.facts ?? {}) as Facts;

@@ -1,16 +1,16 @@
-import { useQuery } from "convex/react";
 import { ArrowRight } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router";
 import { btnDark, btnLight, Card, CopyBtn, input, label, PageHead } from "@/components/hub/mm";
 import { postIdeas } from "@/lib/marketMe";
 import { areaLabel } from "../../convex/marketDefs";
-import { api } from "../../convex/_generated/api";
+import { useApiData } from "@/lib/apiData";
+import { marketMeApi } from "@/lib/marketApi";
 
 // /post-ideas — 4 ready post ideas a month (market update, seasonal, neighborhood spot, story/tip),
 // filled with the agent's name and area. Static copy, no AI.
 export function PostIdeasPage() {
-  const s = useQuery(api.marketMe.settings);
+  const s = useApiData("market-me:settings", () => marketMeApi.settings()).data; // new backend
   const now = new Date();
   const [offset, setOffset] = useState(0);
   const [custom, setCustom] = useState("");

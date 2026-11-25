@@ -1,15 +1,15 @@
-import { useQuery } from "convex/react";
 import { Download, ExternalLink, MessageSquare, Phone } from "lucide-react";
 import QRCode from "qrcode";
 import { useEffect, useState } from "react";
 import { btnDark, btnLight, Card, CopyBtn, H2, PageHead } from "@/components/hub/mm";
 import { smsLink } from "@/lib/marketMe";
 import { profileFor } from "@/lib/rosterProfiles";
-import { api } from "../../convex/_generated/api";
+import { useApiData } from "@/lib/apiData";
+import { marketMeApi } from "@/lib/marketApi";
 
 // /card — each agent's digital business card: QR + text-able link to /c/:slug (public).
 export function BusinessCardPage() {
-  const s = useQuery(api.marketMe.settings);
+  const s = useApiData("market-me:settings", () => marketMeApi.settings()).data; // new backend
   const [qr, setQr] = useState<string | null>(null);
   const url = s?.slug ? `${window.location.origin}/c/${s.slug}` : "";
   useEffect(() => {

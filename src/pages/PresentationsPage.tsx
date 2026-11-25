@@ -1,21 +1,21 @@
-import { useQuery } from "convex/react";
 import { BookOpen, Download, Eye, Loader2, Presentation, Share2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import { toast } from "sonner";
 import { AGENTS, agentByEmail } from "@/lib/agents";
-import { OPS_EMAILS } from "../../convex/agentsData";
+import { useCurrentUser } from "@/auth/session";
 import { DECKS, REAL_START, buildDeck, chicagoToday, deckFileName, defaultEdition, hasAgentPage, prettyDate, realOnly, type DeckKind, type Edition } from "@/lib/deckBuilder";
-import { api } from "../../convex/_generated/api";
 import { GUIDES, buildGuide, guideFileName, type GuideKind } from "@/lib/guideBuilder";
 
 const inputCls = "w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5 text-[15px]";
 
 export function PresentationsPage() {
-  const me = useQuery(api.cma.me);
+  // Who's signed in comes from the new backend's session (the old cma.me no longer answers).
+  const user = useCurrentUser();
+  const me = user === undefined ? undefined : user ? { email: user.email, isStaff: user.role === "admin" || user.role === "ops" } : null;
   const mine = agentByEmail(me?.email);
   // Agents are locked to themselves; staff (and logins not on the agent list yet) pick a name.
-  const canPick = !!me && (me.isAdmin || OPS_EMAILS.includes(me.email) || !mine);
+  const canPick = !!me && (me.isStaff || !mine);
   const [agentName, setAgentName] = useState("");
   const [seller, setSeller] = useState("");
   const [address, setAddress] = useState("");
@@ -31,7 +31,8 @@ export function PresentationsPage() {
   }, [focusGuide, me]);
 
   useEffect(() => {
-    if (!agentName && me) setAgentName(mine?.name ?? "Michael Kang");
+    // Yourself if you're on the roster; otherwise the first person on the roster.
+    if (!agentName && me) setAgentName(mine?.name ?? AGENTS[0]?.name ?? "");
   }, [me, mine, canPick, agentName]);
 
   const agent = useMemo(() => AGENTS.find(a => a.name === agentName), [agentName]);

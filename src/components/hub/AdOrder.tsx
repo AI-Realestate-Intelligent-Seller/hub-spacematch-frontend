@@ -1,14 +1,14 @@
-import { useMutation, useQuery } from "convex/react";
-import { Check, Copy, Megaphone, X } from "lucide-react";
+import { Check, Copy, Loader2, Megaphone, X } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router";
 import { toast } from "sonner";
-import { api } from "../../../convex/_generated/api";
-import type { Id } from "../../../convex/_generated/dataModel";
 import { priceOf, type AdKit, type AdPricing } from "../../../convex/adKit";
+import { FieldError, LoadError, Skeleton } from "./FormState";
+import { apiErrorMessage, useApiData } from "@/lib/apiData";
+import { adOrdersApi } from "@/lib/listingsApi";
 
 export const money = (n: number) => `$${n.toLocaleString()}`;
-const errMsg = (e: unknown) => String((e as Error)?.message ?? e).match(/Uncaught Error: ([^\n]+)/)?.[1] ?? "Something went wrong";
+const errMsg = apiErrorMessage;
 
 export const ORDER_STATUS: Record<string, { label: string; tone: string }> = {
   requested: { label: "Waiting for approval", tone: "bg-amber-100 text-amber-900" },
@@ -100,19 +100,21 @@ export function AdKitView({ kit }: { kit: AdKit }) {
   );
 }
 
-function OrderDialog({ listingId, pricing, onClose }: { listingId: Id<"listings">; pricing: AdPricing; onClose: () => void }) {
-  const place = useMutation(api.adOrders.place);
+function OrderDialog({ listingId, pricing, onClose }: { listingId: string; pricing: AdPricing; onClose: () => void }) {
   const [tier, setTier] = useState("essential");
   const [oh, setOh] = useState(false);
   const [payment, setPayment] = useState<"ahead" | "closing">("closing");
   const [ok, setOk] = useState(false);
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
+  const [noteErr, setNoteErr] = useState("");
   const p = priceOf(pricing, tier, oh, payment);
   const submit = async () => {
+    if (note.trim().length > 500) return setNoteErr("Note is too long (500 characters max).");
+    if (!ok) return toast.error("Tick the box to authorize the charge.");
     setBusy(true);
     try {
-      await place({ listingId, tier, openHouse: oh, payment, authorized: ok, note: note || undefined });
+      await adOrdersApi.place({ listingId, tier, openHouse: oh, payment, authorized: true, note: note.trim() || null });
       toast.success("Ad order sent — admins will approve it");
       onClose();
     } catch (e) {
@@ -163,7 +165,8 @@ function OrderDialog({ listingId, pricing, onClose }: { listingId: Id<"listings"
           ))}
         </div>
 
-        <textarea value={note} onChange={e => setNote(e.target.value)} placeholder="Anything we should know? (optional — open-house date, what you promised the seller)" className="mt-3 w-full rounded-xl border border-stone-200 bg-white p-3 text-[15px]" rows={2} />
+        <textarea value={note} maxLength={500} onChange={e => { setNote(e.target.value); if (noteErr) setNoteErr(""); }} aria-invalid={!!noteErr} placeholder="Anything we should know? (optional — open-house date, what you promised the seller)" className={`mt-3 w-full rounded-xl border bg-white p-3 text-[15px] ${noteErr ? "border-red-400" : "border-stone-200"}`} rows={2} />
+        <div className="flex justify-between gap-3"><FieldError msg={noteErr} /><span className="ml-auto text-xs text-stone-400">{note.length}/500</span></div>
 
         <div className="mt-3 rounded-xl bg-white p-3 text-[15px]">
           <div className="flex justify-between"><span>Ad spend</span><span>{money(p.spend)}</span></div>
@@ -177,7 +180,8 @@ function OrderDialog({ listingId, pricing, onClose }: { listingId: Id<"listings"
           <span className="text-[15px]">I authorize SpaceMatch Inc. to charge me {money(p.total)} for this package{payment === "closing" ? ", deducted from my commission at closing (or my next closing if this listing doesn't close)" : ", paid ahead by Zelle or check"}.</span>
         </label>
 
-        <button disabled={!ok || busy} onClick={submit} className="mt-4 w-full rounded-xl bg-[#9C7434] py-3 font-semibold text-white disabled:opacity-40">
+        <button disabled={!ok || busy} onClick={submit} className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#9C7434] py-3 font-semibold text-white disabled:opacity-40">
+          {busy && <Loader2 className="size-4 animate-spin" />}
           {busy ? "Sending…" : `Send order · ${money(p.total)}`}
         </button>
       </div>
@@ -185,13 +189,22 @@ function OrderDialog({ listingId, pricing, onClose }: { listingId: Id<"listings"
   );
 }
 
-export function ListingAdOrder({ listingId }: { listingId: Id<"listings"> }) {
-  const cfg = useQuery(api.adOrders.config);
-  const data = useQuery(api.adOrders.forListing, { listingId });
-  const cancel = useMutation(api.adOrders.cancel);
+export function ListingAdOrder({ listingId }: { listingId: string }) {
+  const cfgRes = useApiData("ad-orders:config", () => adOrdersApi.config());
+  const res = useApiData(`ad-orders:listing:${listingId}`, () => adOrdersApi.forListing(listingId));
+  const cfg = cfgRes.data;
+  const data = res.data;
   const [open, setOpen] = useState(false);
   const [showKit, setShowKit] = useState(false);
-  if (!cfg || data === undefined || data === null) return null;
+  const [cancelling, setCancelling] = useState(false);
+  const loadError = cfgRes.error ?? res.error;
+  if ((cfg === undefined || data === undefined) && loadError) return <LoadError error={loadError} onRetry={() => { void cfgRes.reload(); void res.reload(); }} what="ad orders" />;
+  if (cfg === undefined || data === undefined) return <Skeleton label="Loading ad orders" rows={1} />;
+  const cancel = (id: string) => {
+    if (!confirm("Cancel this ad order?")) return;
+    setCancelling(true);
+    adOrdersApi.cancel(id).then(() => toast.success("Order cancelled")).catch(e => toast.error(errMsg(e))).finally(() => setCancelling(false));
+  };
   const cur = data.orders.find(o => ["requested", "approved", "live"].includes(o.status));
   const last = data.orders[0];
   return (
@@ -221,7 +234,7 @@ export function ListingAdOrder({ listingId }: { listingId: Id<"listings"> }) {
           {cur.status === "requested" && (
             <div className="flex items-center gap-3 text-stone-500">
               Admins got an email and will approve shortly.
-              <button onClick={() => cancel({ id: cur._id }).catch(e => toast.error(errMsg(e)))} className="text-sm underline">Cancel order</button>
+              <button disabled={cancelling} onClick={() => cancel(cur._id)} className="text-sm underline disabled:opacity-50">{cancelling ? "Cancelling…" : "Cancel order"}</button>
             </div>
           )}
           {cur.adminNote && <div className="text-stone-500">Admin note: {cur.adminNote}</div>}

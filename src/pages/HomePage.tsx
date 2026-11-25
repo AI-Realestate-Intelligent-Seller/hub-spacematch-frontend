@@ -14,6 +14,9 @@ import { AnnouncementsPreview } from "@/pages/AnnouncementsPage";
 import { api } from "../../convex/_generated/api";
 import { useApiData } from "@/lib/apiData";
 import { helpApi } from "@/lib/helpApi";
+import { cmaApi } from "@/lib/cmaApi";
+import { useCurrentUser } from "@/auth/session";
+import { AGENTS } from "@/lib/agents";
 import { formatAddress } from "../../convex/address";
 
 // Today = the one-screen Home (Michael 2026-10-29, #team-app-design 1793285849.414399):
@@ -279,12 +282,24 @@ const APP_LABEL: Record<string, string> = {
 };
 
 export function HomePage() {
-  const me = useQuery(api.hubMe.me);
-  const quota = useQuery(api.cma.quota, {});
+  // Who's signed in, from the new backend's session (the old hubMe.me no longer answers).
+  const user = useCurrentUser();
+  const me = user
+    ? {
+        firstName: user.name.split(/\s+/)[0] ?? "",
+        isAdmin: user.role === "admin",
+        isStaff: user.role === "admin" || user.role === "ops",
+        isShared: false,
+        agentName: AGENTS.find(a => a.email.toLowerCase() === user.email.toLowerCase())?.name ?? null,
+        // Staff can view Today as any agent on the roster.
+        agents: user.role === "admin" || user.role === "ops" ? AGENTS.map(a => a.name) : [],
+      }
+    : undefined;
+  const quota = useApiData("cma:quota", () => cmaApi.quota(), { pollMs: 120_000 }).data; // new backend
   const counts = useQuery(api.forms.counts);
-  const requests = useQuery(api.cma.list);
+  const requests = useApiData("cma:list", () => cmaApi.list(), { pollMs: 120_000 }).data; // new backend
   const help = useApiData("help:list", () => helpApi.list(), { pollMs: 60_000 }).data; // new backend
-  const decide = useMutation(api.cma.decideApproval);
+  const decide = ({ id, approve }: { id: string; approve: boolean }) => cmaApi.decideApproval(id, approve);
   const refresh = useMutation(api.hubToday.requestRefresh);
   const [viewAs, setViewAs] = useState<string | undefined>(undefined);
   const today = useQuery(api.hubToday.mine, { agentName: viewAs });
@@ -354,10 +369,10 @@ export function HomePage() {
       sub: `${formatAddress(r)}`,
       action: (
         <span className="flex shrink-0 gap-1.5">
-          <button type="button" className="rounded-lg bg-[#0A0A0A] px-3 py-2 text-sm font-semibold text-white" onClick={() => decide({ id: r._id, approve: true }).then(() => toast.success("Approved"))}>
+          <button type="button" className="rounded-lg bg-[#0A0A0A] px-3 py-2 text-sm font-semibold text-white" onClick={() => decide({ id: r._id, approve: true }).then(() => toast.success("Approved")).catch(e => toast.error(e instanceof Error ? e.message : "Couldn't approve"))}>
             Approve
           </button>
-          <button type="button" className="rounded-lg bg-stone-100 px-3 py-2 text-sm font-semibold" onClick={() => decide({ id: r._id, approve: false }).then(() => toast("Declined"))}>
+          <button type="button" className="rounded-lg bg-stone-100 px-3 py-2 text-sm font-semibold" onClick={() => decide({ id: r._id, approve: false }).then(() => toast("Declined")).catch(e => toast.error(e instanceof Error ? e.message : "Couldn't decline"))}>
             No
           </button>
         </span>

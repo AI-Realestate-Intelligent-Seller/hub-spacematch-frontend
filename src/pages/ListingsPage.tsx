@@ -4,6 +4,8 @@ import { Link, useNavigate } from "react-router";
 import { toast } from "sonner";
 import { check, digitsOnly, newListingSchema, orNull, priceToCents, typeName, typePhone, typePrice } from "@/lib/listingForms";
 import { apiErrorMessage, fieldErrors, listingsApi, useListingsData } from "@/lib/listingsApi";
+import { useSession } from "@/auth/session";
+import { LoadError, Skeleton } from "@/components/hub/FormState";
 
 export const inputCls = "w-full rounded-xl border border-stone-200 bg-white px-3.5 py-2.5 text-[16px] outline-none focus:border-[#9C7434] focus:ring-2 focus:ring-[#9C7434]/20";
 export const errMsg = apiErrorMessage;
@@ -104,13 +106,15 @@ function NewListing({ staff, onClose }: { staff: boolean; onClose: () => void })
           </div>
           {staff && (
             <label className="block text-sm font-medium">Listing agent
-              <select className={fieldCls(errors.agentUserId)} value={f.agentUserId} onChange={set("agentUserId")}>
+              <select className={fieldCls(errors.agentUserId)} value={f.agentUserId} onChange={set("agentUserId")} disabled={agents.data === undefined}>
                 <option value="">Me</option>
                 {agents.data?.items.map(a => <option key={a._id} value={a._id}>{a.name}</option>)}
               </select>
+              {agents.data === undefined && !agents.error && <div className="mt-2"><Skeleton label="Loading listing agents" rows={1} className="h-16" /></div>}
               <FieldError msg={errors.agentUserId} />
             </label>
           )}
+          {staff && agents.data === undefined && agents.error && <LoadError error={agents.error} onRetry={() => void agents.reload()} what="listing agents" />}
         </div>
         <button disabled={busy} className="mt-5 w-full rounded-xl bg-[#0A0A0A] py-3 font-semibold text-white disabled:opacity-60">{busy ? "Creating…" : "Create listing"}</button>
       </form>
@@ -120,24 +124,28 @@ function NewListing({ staff, onClose }: { staff: boolean; onClose: () => void })
 
 function Unmatched() {
   const inbox = useListingsData("listings:inbox", () => listingsApi.showingInbox(), { pollMs: 60_000 });
-  const data = useListingsData("listings:list:all", () => listingsApi.list("all"));
   const rows = inbox.data?.items;
-  if (!rows?.length) return null;
+  const data = useListingsData(rows?.length ? "listings:list:all" : null, () => listingsApi.list("all"));
   return (
     <section className="mt-8 rounded-2xl bg-amber-50 p-4 ring-1 ring-amber-200">
       <h3 className="flex items-center gap-2 font-semibold"><AlertCircle className="size-4 text-amber-700" /> ShowingTime emails that matched no listing</h3>
       <p className="mt-1 text-sm text-stone-600">Usually the listing isn't in the Hub yet, or its MLS # is missing. Pick the listing to file it.</p>
-      <ul className="mt-3 space-y-2">
+      {rows === undefined ? (
+        <div className="mt-3">{inbox.error ? <LoadError error={inbox.error} onRetry={() => void inbox.reload()} what="unmatched ShowingTime emails" /> : <Skeleton label="Loading unmatched ShowingTime emails" rows={1} />}</div>
+      ) : rows.length === 0 ? (
+        <p className="mt-3 text-sm text-stone-600">No unmatched ShowingTime emails.</p>
+      ) : <ul className="mt-3 space-y-2">
         {rows.map(r => (
           <li key={r._id} className="flex flex-col gap-2 rounded-xl bg-white p-3 text-sm sm:flex-row sm:items-center">
             <div className="min-w-0 flex-1"><div className="truncate font-medium">{r.subject}</div><div className="text-xs text-stone-500">MLS {r.mls ?? "–"} · {ago(r.createdAt)}</div></div>
-            <select className="rounded-lg border border-stone-200 px-2 py-1.5" defaultValue="" onChange={e => e.target.value && listingsApi.assignInbox(r._id, e.target.value).then(() => toast.success("Filed")).catch(err => toast.error(errMsg(err)))}>
-              <option value="">File under…</option>
+            <select className="rounded-lg border border-stone-200 px-2 py-1.5" disabled={!data.data?.items.length} defaultValue="" onChange={e => e.target.value && listingsApi.assignInbox(r._id, e.target.value).then(() => toast.success("Filed")).catch(err => toast.error(errMsg(err)))}>
+              <option value="">{data.data ? (data.data.items.length ? "File under…" : "No listings to file under") : "File under…"}</option>
               {data.data?.items.map(l => <option key={l._id} value={l._id}>{l.address}</option>)}
             </select>
           </li>
         ))}
-      </ul>
+      </ul>}
+      {!!rows?.length && data.data === undefined && <div className="mt-3">{data.error ? <LoadError error={data.error} onRetry={() => void data.reload()} what="listing options" /> : <Skeleton label="Loading listing options" rows={1} className="h-16" />}</div>}
     </section>
   );
 }
@@ -172,7 +180,8 @@ export function ListingsPage() {
   const [scope, setScope] = useState<"mine" | "all">("all");
   const { data, error, reload } = useListingsData(`listings:list:${scope}`, () => listingsApi.list(scope), { pollMs: 60_000 });
   const [open, setOpen] = useState(false);
-  const staff = !!data?.me.staff;
+  const { user } = useSession();
+  const staff = data?.me.staff ?? (user?.role === "admin" || user?.role === "ops");
   return (
     <div>
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -201,7 +210,7 @@ export function ListingsPage() {
       ) : data.items.length === 0 ? (
         <div className="mt-8 rounded-3xl border-2 border-dashed border-stone-200 p-10 text-center">
           <Building2 className="mx-auto size-10 text-[#9C7434]" />
-          <h3 className="mt-3 font-display text-xl">No listings yet</h3>
+          <h3 className="mt-3 font-display text-xl">{scope === "mine" ? "You have no listings yet" : "No listings yet"}</h3>
           <p className="mt-1 text-sm text-stone-600">Create one the day you sign the listing agreement so the seller can follow the launch from day one.</p>
           <button onClick={() => setOpen(true)} className="mt-4 rounded-full bg-[#9C7434] px-5 py-2.5 text-sm font-semibold text-white">Create the first listing</button>
         </div>

@@ -166,11 +166,8 @@ export function AuthenticatedAppRoutes() {
   return (
     <SessionProvider>
       <SpaceSession>
-        {hasConvexDeployment ? (
-          <RosterGate><AuthenticatedRoutes /></RosterGate>
-        ) : (
-          <AuthenticatedRoutes />
-        )}
+        {/* The roster comes from the new backend now, so it loads with or without Convex. */}
+        <RosterGate><AuthenticatedRoutes /></RosterGate>
       </SpaceSession>
     </SessionProvider>
   );

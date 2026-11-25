@@ -40,7 +40,7 @@ const LOFTY_READY = true; // 19 SM Smart Plans live in Lofty (tag-triggered) sin
 export function EmailsPage() {
   const [params, setParams] = useSearchParams();
   const { data, error, reload } = useApiData("email-templates", () => emailTemplatesApi.overview(), { pollMs: 120_000 });
-  const tab = (params.get("tab") as Tab) || "library";
+  const requestedTab = params.get("tab");
   const go = (t: Tab, extra: Record<string, string> = {}) => setParams({ tab: t, ...extra }, { replace: true });
   const tabs: { id: Tab; label: string; icon: React.ComponentType<{ className?: string }>; show?: boolean }[] = [
     { id: "library", label: "Ready-made", icon: Sparkles },
@@ -49,6 +49,8 @@ export function EmailsPage() {
     { id: "mine", label: "My templates", icon: Pencil },
     { id: "review", label: `Review${data?.review.length ? ` (${data.review.length})` : ""}`, icon: Users, show: !!data?.canReview },
   ];
+  const tab = tabs.find(t => t.id === requestedTab)?.id ?? "library";
+  const overviewLoading = data === undefined && !error;
   const [draft, setDraft] = useState<{ subject: string; body: string; basedOn?: string; segment?: string; title?: string } | null>(null);
 
   return (
@@ -72,18 +74,27 @@ export function EmailsPage() {
           );
         })}
       </div>
-      {tab === "library" && <Library team={data?.team ?? []} onEdit={d => { setDraft(d); go("mine"); }} />}
-      {tab === "rent" && <RentVsOwn ratePct={data?.rate.ratePct ?? 7.24} rateNote={data ? `${data.rate.source}, ${data.rate.asOf}` : ""} canSetRate={!!data?.canReview} />}
-      {tab === "moveup" && <MoveUp ratePct={data?.rate.ratePct ?? 7.24} />}
+      {tab === "library" && <Library team={data?.team} error={error} reload={reload} onEdit={d => { setDraft(d); go("mine"); }} />}
+      {(tab === "rent" || tab === "moveup") && (
+        overviewLoading ? <Skeleton label="Loading team mortgage rate" rows={2} /> : (
+          <>
+            {data === undefined && <LoadError error={error} onRetry={() => void reload()} what="the team mortgage rate" />}
+            {tab === "rent"
+              ? <RentVsOwn ratePct={data?.rate.ratePct ?? 7.24} rateNote={data ? `${data.rate.source}, ${data.rate.asOf}` : "Default estimate"} canSetRate={!!data?.canReview} />
+              : <MoveUp ratePct={data?.rate.ratePct ?? 7.24} />}
+          </>
+        )
+      )}
       {tab === "mine" && (data === undefined && error ? <LoadError error={error} onRetry={() => void reload()} what="your templates" />
         : <MyTemplates mine={data?.mine} draft={draft} clearDraft={() => setDraft(null)} canReview={!!data?.canReview} />)}
-      {tab === "review" && (data === undefined ? (error ? <LoadError error={error} onRetry={() => void reload()} what="templates to review" /> : <Skeleton rows={2} />) : data.canReview && <Review rows={data.review} />)}
+      {tab === "review" && (data === undefined ? (error ? <LoadError error={error} onRetry={() => void reload()} what="templates to review" /> : <Skeleton label="Loading templates to review" rows={2} />)
+        : data.canReview ? <Review rows={data.review} /> : <EmptyState icon={<Users className="size-8" />} title="Template review is available to office staff" action={<Link to="/emails" className={btnLight}>Browse ready-made emails</Link>} />)}
     </div>
   );
 }
 
 // ---------------- Ready-made library ----------------
-function Library({ team, onEdit }: { team: Doc[]; onEdit: (d: { subject: string; body: string; basedOn?: string; segment?: string; title?: string }) => void }) {
+function Library({ team, error, reload, onEdit }: { team?: Doc[]; error: unknown; reload: () => Promise<void>; onEdit: (d: { subject: string; body: string; basedOn?: string; segment?: string; title?: string }) => void }) {
   const signer = useSigner();
   const [seg, setSeg] = useState(SEGMENTS[0].id);
   const [grp, setGrp] = useState(GROUPS[0].id);
@@ -91,11 +102,11 @@ function Library({ team, onEdit }: { team: Doc[]; onEdit: (d: { subject: string;
   const [to, setTo] = useState("");
   const [hood, setHood] = useState("");
   const [open, setOpen] = useState<string | null>(SEGMENTS[0].emails[0].id);
-  const teamSeg = team.length ? [{ id: "team", label: `From the team (${team.length})` }] : [];
+  const teamSeg = { id: "team", label: team ? `From the team (${team.length})` : "From the team" };
   const segment = SEGMENTS.find(s => s.id === seg);
   const emails: (LibEmail & { by?: string })[] = segment
     ? segment.emails
-    : team.map(t => ({ id: t._id, step: `By ${t.ownerName}`, subject: t.subject, body: t.body, by: t.ownerName }));
+    : (team ?? []).map(t => ({ id: t._id, step: `By ${t.ownerName}`, subject: t.subject, body: t.body, by: t.ownerName }));
   const vals = { first_name: first, neighborhood: hood, agent_first: signer.name.split(" ")[0], agent_name: signer.name, agent_phone: signer.phone };
   const download = () => {
     const blob = new Blob([libraryCsv()], { type: "text/csv" });
@@ -125,7 +136,7 @@ function Library({ team, onEdit }: { team: Doc[]; onEdit: (d: { subject: string;
         ))}
       </div>
       <div className="-mx-4 flex gap-1.5 overflow-x-auto px-4 pb-1 [scrollbar-width:none] md:mx-0 md:flex-wrap md:px-0">
-        {[...SEGMENTS.filter(s => (GROUPS.find(g => g.id === grp)?.segs ?? []).includes(s.id)).map(s => ({ id: s.id, label: s.label })), ...(grp === "touch" ? teamSeg : [])].map(s => (
+        {[...SEGMENTS.filter(s => (GROUPS.find(g => g.id === grp)?.segs ?? []).includes(s.id)).map(s => ({ id: s.id, label: s.label })), ...(grp === "touch" ? [teamSeg] : [])].map(s => (
           <button key={s.id} type="button" data-testid={`seg-${s.id}`} onClick={() => { setSeg(s.id); setOpen(null); }}
             className={`shrink-0 rounded-full px-3.5 py-1.5 text-[14px] font-semibold ${seg === s.id ? "bg-[#0A0A0A] text-white" : "bg-white text-stone-700 ring-1 ring-[#ebe5da]"}`}>
             {s.label}
@@ -138,6 +149,11 @@ function Library({ team, onEdit }: { team: Doc[]; onEdit: (d: { subject: string;
           {segment && (
             <p className="text-[15px] text-stone-600"><b className="text-stone-800">Who:</b> {segment.who} <span className="whitespace-nowrap"><b className="text-stone-800">When:</b> {segment.cadence}.</span></p>
           )}
+          {seg === "team" && (team === undefined ? (
+            error ? <LoadError error={error} onRetry={() => void reload()} what="team templates" /> : <Skeleton label="Loading team templates" rows={2} />
+          ) : team.length === 0 && (
+            <EmptyState icon={<Inbox className="size-8" />} title="No team templates yet">Approved templates from the team will appear here.</EmptyState>
+          ))}
           {emails.map(m => {
             const isOpen = open === m.id;
             const subject = fillSubject(m.subject, vals);
@@ -472,7 +488,7 @@ function MyTemplates({ mine, draft, clearDraft, canReview }: {
           <Link to="/emails?tab=library" className={btnLight}><FileText className="size-4" /> Start from ready-made</Link>
         </div>
       </section>
-      {mine === undefined && <Skeleton rows={2} className="h-24" />}
+      {mine === undefined && <Skeleton label="Loading your templates" rows={2} className="h-24" />}
       {mine?.length === 0 && (
         <EmptyState icon={<Mail className="size-8" />} title="No templates yet">
           Tap <b>Blank</b> to write one, or <b>Make my own version</b> on any ready-made email. Only you see them until you suggest one for the team.

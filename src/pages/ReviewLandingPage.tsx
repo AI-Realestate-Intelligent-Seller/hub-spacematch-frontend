@@ -1,27 +1,55 @@
-import { useMutation, useQuery } from "convex/react";
-import { Star } from "lucide-react";
+import { Loader2, Star } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router";
+import { FieldError } from "@/components/hub/FormState";
+import { apiErrorMessage, useApiData } from "@/lib/apiData";
+import { marketMeApi } from "@/lib/marketApi";
 import { profileFor } from "@/lib/rosterProfiles";
-import { api } from "../../convex/_generated/api";
+
+const MAX_NOTE = 1000;
 
 // /r/:token — public page a client opens from a review request (no login). No review gating:
 // the Google button is always shown; the private note is optional and separate.
 export function ReviewLandingPage() {
   const { token = "" } = useParams();
-  const r = useQuery(api.marketMe.reviewView, { token });
-  const ping = useMutation(api.marketMe.reviewPing);
+  const res = useApiData(`review:${token}`, () => marketMeApi.reviewView(token));
+  // undefined = loading, null = link not found
+  const r = res.notFound ? null : res.data;
   const [note, setNote] = useState("");
+  const [noteErr, setNoteErr] = useState("");
+  const [sending, setSending] = useState(false);
   const [sent, setSent] = useState(false);
   const opened = useRef(false);
   useEffect(() => {
     if (r && !opened.current) {
       opened.current = true;
-      ping({ token, event: "open" }).catch(() => {});
+      marketMeApi.reviewPing(token, "open").catch(() => {});
     }
-  }, [r, token, ping]);
+  }, [r, token]);
+  const sendNote = async () => {
+    const t = note.trim();
+    if (!t) return setNoteErr("Write a note first.");
+    if (t.length > MAX_NOTE) return setNoteErr(`Your note is too long (${MAX_NOTE} characters max).`);
+    setSending(true);
+    try {
+      await marketMeApi.reviewNote(token, t);
+      setSent(true);
+    } catch (e) {
+      setNoteErr(apiErrorMessage(e));
+    } finally {
+      setSending(false);
+    }
+  };
 
-  if (r === undefined) return <div className="min-h-svh bg-[#F7F5F1]" />;
+  if (r === undefined && res.error) return (
+    <div className="grid min-h-svh place-items-center bg-[#F7F5F1] p-6 text-center">
+      <div className="text-[18px] text-stone-700">
+        Couldn't load this page. Check your connection.
+        <button type="button" onClick={() => void res.reload()} className="mt-3 block w-full rounded-xl bg-[#0A0A0A] py-3 text-[17px] font-bold text-white">Try again</button>
+      </div>
+    </div>
+  );
+  if (r === undefined) return <div className="grid min-h-svh place-items-center bg-[#F7F5F1]"><Loader2 className="size-7 animate-spin text-[#9C7434]" aria-label="Loading" /></div>;
   if (r === null)
     return (
       <div className="grid min-h-svh place-items-center bg-[#F7F5F1] p-6 text-center text-[18px] text-stone-700">
@@ -56,7 +84,7 @@ export function ReviewLandingPage() {
           href={r.reviewUrl}
           target="_blank"
           rel="noreferrer"
-          onClick={() => ping({ token, event: "click" }).catch(() => {})}
+          onClick={() => { marketMeApi.reviewPing(token, "click").catch(() => {}); }}
           className="flex min-h-[60px] items-center justify-center gap-2 rounded-2xl bg-[#9C7434] px-5 text-[19px] font-bold text-white"
           data-testid="review-google"
         >
@@ -72,19 +100,23 @@ export function ReviewLandingPage() {
             <>
               <textarea
                 value={note}
-                onChange={e => setNote(e.target.value)}
+                onChange={e => { setNote(e.target.value.slice(0, MAX_NOTE)); if (noteErr) setNoteErr(""); }}
+                maxLength={MAX_NOTE}
                 rows={4}
-                className="w-full rounded-xl border-2 border-stone-300 p-3 text-[17px] outline-none focus:border-[#0A0A0A]"
+                aria-label="Your private note"
+                aria-invalid={!!noteErr}
+                className={`w-full rounded-xl border-2 p-3 text-[17px] outline-none focus:border-[#0A0A0A] ${noteErr ? "border-red-400" : "border-stone-300"}`}
                 data-testid="review-note"
               />
+              <div className="flex items-start justify-between gap-3"><FieldError msg={noteErr} /><span className="ml-auto mt-1 text-sm text-stone-500">{note.length}/{MAX_NOTE}</span></div>
               <button
                 type="button"
-                disabled={!note.trim()}
-                onClick={() => ping({ token, event: "note", note }).then(() => setSent(true))}
-                className="mt-2 min-h-[48px] w-full rounded-xl bg-[#0A0A0A] text-[17px] font-bold text-white disabled:opacity-50"
+                disabled={!note.trim() || sending}
+                onClick={sendNote}
+                className="mt-2 inline-flex min-h-[48px] w-full items-center justify-center gap-2 rounded-xl bg-[#0A0A0A] text-[17px] font-bold text-white disabled:opacity-50"
                 data-testid="review-note-send"
               >
-                Send privately
+                {sending && <Loader2 className="size-5 animate-spin" />}{sending ? "Sending…" : "Send privately"}
               </button>
             </>
           )}

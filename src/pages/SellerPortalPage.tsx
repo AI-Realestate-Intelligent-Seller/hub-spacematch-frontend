@@ -42,8 +42,8 @@ function SocialReel({ data }: { data: PortalData }) {
   const latest = (k: "reelViews" | "fbViews" | "tiktokViews" | "youtubeViews") => [...m].reverse().find(x => x[k] != null);
   const rows = ([
     ["Instagram", "reelViews", "reel", data.links.reel, data.social.reelCheckedAt],
-    ["Facebook", "fbViews", "", data.links.facebook, undefined],
-    ["TikTok", "tiktokViews", "", data.links.tiktok, undefined],
+    ["Facebook", "fbViews", "facebook", data.links.facebook, undefined],
+    ["TikTok", "tiktokViews", "tiktok", data.links.tiktok, undefined],
     ["YouTube Shorts", "youtubeViews", "youtube", data.links.youtube, data.social.youtubeCheckedAt],
   ] as const).flatMap(([label, k, autoKey, href, checked]) => {
     const r = latest(k);

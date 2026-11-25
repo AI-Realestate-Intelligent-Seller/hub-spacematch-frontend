@@ -129,7 +129,7 @@ export function HelpPage() {
   if (!data) return (
     <div className="space-y-6">
       <div className="flex items-center gap-3"><LifeBuoy className="size-7 text-[#9C7434]" /><h1 className="font-['Playfair_Display'] text-3xl font-bold">Help requests</h1></div>
-      {error ? <LoadError error={error} onRetry={() => void reload()} what="help requests" /> : <Skeleton rows={3} className="h-24" />}
+      {error ? <LoadError error={error} onRetry={() => void reload()} what="help requests" /> : <Skeleton label="Loading help requests" rows={3} className="h-24" />}
     </div>
   );
   const rows = data.toMe.filter(r => (!fTo || r.toEmail === fTo) && (!fFrom || r.fromEmail === fFrom) && (!fUrg || r.urgency === fUrg));
@@ -168,30 +168,40 @@ export function HelpPage() {
             </select>
           </div>
           <p className="text-xs text-stone-500">Due: Urgent within 1 hour, Today by end of day, This week by Friday (Chicago time). Overdue cards turn red. Moving a card emails the agent with your note.</p>
-          {/* Phone: one column at a time */}
-          <div className="flex gap-1 overflow-x-auto rounded-full bg-stone-100 p-1 text-sm md:hidden">
-            {HELP_STATUSES.map(s => (
-              <button key={s} onClick={() => setMobileCol(s)} className={`shrink-0 rounded-full px-3 py-1.5 ${mobileCol === s ? "bg-white font-semibold shadow-sm" : "text-stone-600"}`}>
-                {HELP_STATUS_LABEL[s]} ({rows.filter(r => r.status === s).length})
-              </button>
-            ))}
-          </div>
-          <div className="grid gap-3 md:grid-cols-4">
-            {HELP_STATUSES.map(s => {
-              const items = col(s);
-              return (
-                <div key={s} className={`${mobileCol === s ? "block" : "hidden"} rounded-2xl bg-stone-100/70 p-2.5 md:block`} data-testid={`help-col-${s}`}>
-                  <div className="mb-2 flex items-center gap-2 px-1 text-sm font-semibold">
-                    <span className={`size-2.5 rounded-full ${COL_TONE[s]}`} /> {HELP_STATUS_LABEL[s]} <span className="text-stone-500">{rows.filter(r => r.status === s).length}</span>
-                  </div>
-                  <div className="space-y-2">
-                    {items.length === 0 && <div className="px-1 py-3 text-sm text-stone-500">{s === "new" ? "No new requests." : s === "done" ? "Nothing finished yet." : "Nothing here."}</div>}
-                    {items.map(r => <Card key={r._id} r={r} now={now} isAdmin={data.isAdmin} myEmail={data.myEmail} support={data.support} />)}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+          {rows.length === 0 && (data.toMe.length === 0 ? (
+            <EmptyState icon={<Inbox className="size-8" />} title="No help requests on the board yet" />
+          ) : (
+            <EmptyState icon={<Inbox className="size-8" />} title="No requests match these filters"
+              action={<button type="button" className={sel} onClick={() => { setFTo(""); setFFrom(""); setFUrg(""); }}>Clear filters</button>} />
+          ))}
+          {rows.length > 0 && (
+            <>
+              {/* Phone: one column at a time */}
+              <div className="flex gap-1 overflow-x-auto rounded-full bg-stone-100 p-1 text-sm md:hidden">
+                {HELP_STATUSES.map(s => (
+                  <button key={s} onClick={() => setMobileCol(s)} className={`shrink-0 rounded-full px-3 py-1.5 ${mobileCol === s ? "bg-white font-semibold shadow-sm" : "text-stone-600"}`}>
+                    {HELP_STATUS_LABEL[s]} ({rows.filter(r => r.status === s).length})
+                  </button>
+                ))}
+              </div>
+              <div className="grid gap-3 md:grid-cols-4">
+                {HELP_STATUSES.map(s => {
+                  const items = col(s);
+                  return (
+                    <div key={s} className={`${mobileCol === s ? "block" : "hidden"} rounded-2xl bg-stone-100/70 p-2.5 md:block`} data-testid={`help-col-${s}`}>
+                      <div className="mb-2 flex items-center gap-2 px-1 text-sm font-semibold">
+                        <span className={`size-2.5 rounded-full ${COL_TONE[s]}`} /> {HELP_STATUS_LABEL[s]} <span className="text-stone-500">{rows.filter(r => r.status === s).length}</span>
+                      </div>
+                      <div className="space-y-2">
+                        {items.length === 0 && <div className="px-1 py-3 text-sm text-stone-500">{s === "new" ? "No new requests." : s === "done" ? "Nothing finished yet." : "Nothing here."}</div>}
+                        {items.map(r => <Card key={r._id} r={r} now={now} isAdmin={data.isAdmin} myEmail={data.myEmail} support={data.support} />)}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
         </section>
       )}
       <section>

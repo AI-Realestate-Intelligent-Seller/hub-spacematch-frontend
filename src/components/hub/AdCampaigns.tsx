@@ -1,10 +1,10 @@
-import { useMutation, useQuery } from "convex/react";
 import { AlertTriangle, ExternalLink, Loader2, Lock, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { api } from "../../../convex/_generated/api";
-import type { Id } from "../../../convex/_generated/dataModel";
 import type { PublicAd } from "../../../convex/listingAds";
+import { FieldError, LoadError, Skeleton, errorBorder } from "./FormState";
+import { apiErrorMessage, fieldErrors, useApiData } from "@/lib/apiData";
+import { type AdChannel, type ListingAdRow, listingAdsApi } from "@/lib/listingsApi";
 
 type Channel = "meta" | "google" | "lofty" | "website";
 
@@ -118,14 +118,34 @@ export function SellerAdCampaigns({ ads }: { ads: PublicAd[] }) {
 // ---------- Agent listing page ----------
 
 const inputCls = "w-full rounded-xl border border-stone-200 bg-white px-3 py-2 text-[16px] outline-none focus:border-[#9C7434] focus:ring-2 focus:ring-[#9C7434]/20";
-const errMsg = (e: unknown) => String((e as Error)?.message ?? e).match(/Uncaught Error: ([^\n]+)/)?.[1] ?? "Something went wrong";
+const errMsg = apiErrorMessage;
 
-type Row = NonNullable<ReturnType<typeof useAdsData>>["rows"][number];
-const useAdsData = (id: Id<"listings">) => useQuery(api.listingAds.forListing, { id });
+type Row = ListingAdRow;
+const useAdsData = (id: string) => useApiData(`listing-ads:${id}`, () => listingAdsApi.forListing(id), { pollMs: 120_000 });
+/** Same checks as the backend (listing-ad.validation.ts). */
+function checkAd(f: { startDate: string; endDate: string; reach: string; clicks: string; leads: string; spend: string; budget: string; campaignRef: string; adLink: string; note: string }) {
+  const e: Record<string, string> = {};
+  for (const [k, label] of [["reach", "Reach"], ["clicks", "Clicks"], ["leads", "Leads"], ["spend", "Spend"], ["budget", "Budget"]] as const) {
+    const v = f[k];
+    if (v && (!/^\d+(\.\d{1,2})?$/.test(v) || Number(v) > 1e9)) e[k] = `${label} must be a number (up to 2 decimals).`;
+  }
+  if (f.startDate && f.endDate && f.endDate < f.startDate) e.endDate = "End date is before the start date.";
+  if (f.campaignRef.length > 200) e.campaignRef = "Campaign name is too long (200 characters max).";
+  if (f.note.length > 400) e.note = "Note is too long (400 characters max).";
+  if (f.adLink) {
+    try {
+      if (new URL(f.adLink).protocol !== "https:") throw new Error();
+    } catch {
+      e.adLink = "Ad link must be a full link starting with https://";
+    }
+  }
+  return e;
+}
 
-function ManualCard({ listingId, channel, row, street }: { listingId: Id<"listings">; channel: "meta" | "google" | "lofty"; row?: Row; street: string }) {
+function ManualCard({ listingId, channel, row, street }: { listingId: string; channel: AdChannel; row?: Row; street: string }) {
   const c = CHANNELS[channel];
-  const save = useMutation(api.listingAds.save);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
   const blank = () => ({
     status: row?.status ?? "not_started", startDate: row?.startDate ?? "", endDate: row?.endDate ?? "",
     reach: row?.reach?.toString() ?? "", clicks: row?.clicks?.toString() ?? "", leads: row?.leads?.toString() ?? "",
@@ -136,16 +156,30 @@ function ManualCard({ listingId, channel, row, street }: { listingId: Id<"listin
   const [open, setOpen] = useState(false);
   useEffect(() => setF(blank()), [row?.updatedAt]); // eslint-disable-line react-hooks/exhaustive-deps
   const set = (k: keyof ReturnType<typeof blank>) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
-    setF({ ...f, [k]: ["reach", "clicks", "leads", "spend", "budget"].includes(k) ? e.target.value.replace(/[^\d.]/g, "") : e.target.value });
+    setF({ ...f, [k]: ["reach", "clicks", "leads", "spend", "budget"].includes(k) ? e.target.value.replace(/[^\d.]/g, "").replace(/(\..*)\./g, "$1").slice(0, 13) : k === "adLink" ? e.target.value.trim() : e.target.value });
   const n = (s: string) => (s === "" ? null : Number(s));
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    const errs = checkAd(f);
+    setErrors(errs);
+    if (Object.keys(errs).length) return;
+    setBusy(true);
     try {
-      await save({ id: listingId, channel, status: f.status, startDate: f.startDate || undefined, endDate: f.endDate || undefined, reach: n(f.reach), clicks: n(f.clicks), leads: n(f.leads), spend: n(f.spend), budget: n(f.budget), campaignRef: f.campaignRef, adLink: f.adLink, note: f.note });
+      await listingAdsApi.save(listingId, channel, {
+        status: f.status, startDate: f.startDate || null, endDate: f.endDate || null, reach: n(f.reach), clicks: n(f.clicks), leads: n(f.leads),
+        spend: n(f.spend), budget: n(f.budget), campaignRef: f.campaignRef.trim() || null, adLink: f.adLink || null, note: f.note.trim() || null,
+      });
       toast.success(f.status === "not_started" ? "Saved" : "Saved. Your seller sees the results now.");
       setOpen(false);
-    } catch (err) { toast.error(errMsg(err)); }
+      setErrors({});
+    } catch (err) {
+      setErrors(fieldErrors(err));
+      toast.error(errMsg(err));
+    } finally {
+      setBusy(false);
+    }
   };
+  const fe = (k: string) => <FieldError msg={errors[k]} />;
   const cpl = row?.spend && row?.leads ? row.spend / row.leads : undefined;
   const auto = !!row && (row.source === "meta" || row.source === "google_ads");
   const matched: { id: string; name: string; status: string }[] = auto && row?.campaigns ? JSON.parse(row.campaigns) : [];
@@ -178,7 +212,7 @@ function ManualCard({ listingId, channel, row, street }: { listingId: Id<"listin
       )}
       {row?.error && auto && <p className="mt-2 flex items-center gap-1 text-xs text-red-600"><AlertTriangle className="size-3.5" /> Last update failed: {row.error}</p>}
       {!auto && !open && channel !== "lofty" && (
-        <p className="mt-3 text-[15px] text-stone-600">Fills in by itself: put the street (“{street}”) in the campaign name in {channel === "meta" ? "Meta Ads Manager" : "Google Ads"}, or type the campaign name here.</p>
+        <p className="mt-3 text-[15px] text-stone-600">Type the numbers from {channel === "meta" ? "Meta Ads Manager" : "Google Ads"}. Put the street (“{street}”) in the campaign name so they fill in by themselves once {channel === "meta" ? "Meta Ads" : "Google Ads"} is connected.</p>
       )}
       {!auto && !open && channel === "lofty" && (
         <p className="mt-3 text-[15px] text-stone-600">Lofty doesn't share ad numbers with other apps, so type these from Lofty's ad report.</p>
@@ -188,18 +222,18 @@ function ManualCard({ listingId, channel, row, street }: { listingId: Id<"listin
           {auto ? "Edit link & note" : row ? "Update numbers" : channel === "lofty" ? "Add campaign" : "Add campaign name"}
         </button>
       ) : auto ? (
-        <form onSubmit={submit} className="mt-4 space-y-3 border-t border-stone-100 pt-4">
-          <label className="block text-xs font-medium text-stone-600">Campaign name (leave empty to match by street)<input className={inputCls} value={f.campaignRef} onChange={set("campaignRef")} /></label>
-          <label className="block text-xs font-medium text-stone-600">Total budget ($) 🔒<input inputMode="decimal" className={inputCls} value={f.budget} onChange={set("budget")} /></label>
-          <label className="block text-xs font-medium text-stone-600">Ad link for the seller (optional)<input className={inputCls} value={f.adLink} onChange={set("adLink")} placeholder="https://…" /></label>
-          <label className="block text-xs font-medium text-stone-600">Note for the seller (optional)<textarea className={`${inputCls} min-h-[60px]`} value={f.note} onChange={set("note")} /></label>
+        <form onSubmit={submit} noValidate className="mt-4 space-y-3 border-t border-stone-100 pt-4">
+          <label className="block text-xs font-medium text-stone-600">Campaign name (leave empty to match by street)<input maxLength={200} className={`${inputCls} ${errorBorder(errors.campaignRef)}`} value={f.campaignRef} onChange={set("campaignRef")} />{fe("campaignRef")}</label>
+          <label className="block text-xs font-medium text-stone-600">Total budget ($) 🔒<input inputMode="decimal" className={`${inputCls} ${errorBorder(errors.budget)}`} value={f.budget} onChange={set("budget")} />{fe("budget")}</label>
+          <label className="block text-xs font-medium text-stone-600">Ad link for the seller (optional)<input type="url" maxLength={600} className={`${inputCls} ${errorBorder(errors.adLink)}`} value={f.adLink} onChange={set("adLink")} placeholder="https://…" />{fe("adLink")}</label>
+          <label className="block text-xs font-medium text-stone-600">Note for the seller (optional)<textarea maxLength={400} className={`${inputCls} min-h-[60px] ${errorBorder(errors.note)}`} value={f.note} onChange={set("note")} />{fe("note")}</label>
           <div className="flex gap-2">
-            <button className="rounded-xl bg-[#9C7434] px-5 py-2 text-sm font-semibold text-white">Save</button>
-            <button type="button" onClick={() => { setF(blank()); setOpen(false); }} className="rounded-xl px-4 py-2 text-sm ring-1 ring-stone-200">Cancel</button>
+            <button disabled={busy} className="inline-flex items-center gap-1.5 rounded-xl bg-[#9C7434] px-5 py-2 text-sm font-semibold text-white disabled:opacity-60">{busy && <Loader2 className="size-4 animate-spin" />}Save</button>
+            <button type="button" onClick={() => { setF(blank()); setErrors({}); setOpen(false); }} className="rounded-xl px-4 py-2 text-sm ring-1 ring-stone-200">Cancel</button>
           </div>
         </form>
       ) : (
-        <form onSubmit={submit} className="mt-4 space-y-3 border-t border-stone-100 pt-4">
+        <form onSubmit={submit} noValidate className="mt-4 space-y-3 border-t border-stone-100 pt-4">
           <p className="text-xs text-stone-500">Where to find it: {c.where}</p>
           <div className="grid grid-cols-3 gap-3">
             <label className="block text-xs font-medium text-stone-600">Status
@@ -207,27 +241,27 @@ function ManualCard({ listingId, channel, row, street }: { listingId: Id<"listin
                 {Object.entries(STATUS).map(([k, s]) => <option key={k} value={k}>{s.label}</option>)}
               </select>
             </label>
-            <label className="block text-xs font-medium text-stone-600">Start<input type="date" className={inputCls} value={f.startDate} onChange={set("startDate")} /></label>
-            <label className="block text-xs font-medium text-stone-600">End<input type="date" className={inputCls} value={f.endDate} onChange={set("endDate")} /></label>
+            <label className="block text-xs font-medium text-stone-600">Start<input type="date" className={`${inputCls} ${errorBorder(errors.startDate)}`} value={f.startDate} onChange={set("startDate")} />{fe("startDate")}</label>
+            <label className="block text-xs font-medium text-stone-600">End<input type="date" min={f.startDate || undefined} className={`${inputCls} ${errorBorder(errors.endDate)}`} value={f.endDate} onChange={set("endDate")} />{fe("endDate")}</label>
           </div>
           <div className="grid grid-cols-3 gap-3">
-            <label className="block text-xs font-medium text-stone-600">{c.reach}<input aria-label={`${channel} reach`} inputMode="numeric" className={inputCls} value={f.reach} onChange={set("reach")} /></label>
-            <label className="block text-xs font-medium text-stone-600">{c.clicks}<input aria-label={`${channel} clicks`} inputMode="numeric" className={inputCls} value={f.clicks} onChange={set("clicks")} /></label>
-            <label className="block text-xs font-medium text-stone-600">{c.leads}<input aria-label={`${channel} leads`} inputMode="numeric" className={inputCls} value={f.leads} onChange={set("leads")} /></label>
+            <label className="block text-xs font-medium text-stone-600">{c.reach}<input aria-label={`${channel} reach`} inputMode="numeric" className={`${inputCls} ${errorBorder(errors.reach)}`} value={f.reach} onChange={set("reach")} />{fe("reach")}</label>
+            <label className="block text-xs font-medium text-stone-600">{c.clicks}<input aria-label={`${channel} clicks`} inputMode="numeric" className={`${inputCls} ${errorBorder(errors.clicks)}`} value={f.clicks} onChange={set("clicks")} />{fe("clicks")}</label>
+            <label className="block text-xs font-medium text-stone-600">{c.leads}<input aria-label={`${channel} leads`} inputMode="numeric" className={`${inputCls} ${errorBorder(errors.leads)}`} value={f.leads} onChange={set("leads")} />{fe("leads")}</label>
           </div>
           <div className="rounded-xl bg-stone-50 p-3">
             <div className="mb-2 flex items-center gap-1 text-xs font-semibold text-stone-600"><Lock className="size-3" /> Agent only: sellers never see these</div>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-              <label className="block text-xs font-medium text-stone-600">Spent so far ($)<input aria-label={`${channel} spend`} inputMode="decimal" className={inputCls} value={f.spend} onChange={set("spend")} /></label>
-              <label className="block text-xs font-medium text-stone-600">Total budget ($)<input inputMode="decimal" className={inputCls} value={f.budget} onChange={set("budget")} /></label>
-              <label className="col-span-2 block text-xs font-medium text-stone-600 sm:col-span-1">Campaign name<input className={inputCls} value={f.campaignRef} onChange={set("campaignRef")} placeholder="As named in the ads account" /></label>
+              <label className="block text-xs font-medium text-stone-600">Spent so far ($)<input aria-label={`${channel} spend`} inputMode="decimal" className={`${inputCls} ${errorBorder(errors.spend)}`} value={f.spend} onChange={set("spend")} />{fe("spend")}</label>
+              <label className="block text-xs font-medium text-stone-600">Total budget ($)<input inputMode="decimal" className={`${inputCls} ${errorBorder(errors.budget)}`} value={f.budget} onChange={set("budget")} />{fe("budget")}</label>
+              <label className="col-span-2 block text-xs font-medium text-stone-600 sm:col-span-1">Campaign name<input maxLength={200} className={`${inputCls} ${errorBorder(errors.campaignRef)}`} value={f.campaignRef} onChange={set("campaignRef")} placeholder="As named in the ads account" />{fe("campaignRef")}</label>
             </div>
           </div>
-          <label className="block text-xs font-medium text-stone-600">Ad link for the seller (optional)<input className={inputCls} value={f.adLink} onChange={set("adLink")} placeholder="https://…" /></label>
-          <label className="block text-xs font-medium text-stone-600">Note for the seller (optional)<textarea className={`${inputCls} min-h-[60px]`} value={f.note} onChange={set("note")} placeholder="Targeting buyers in Naperville & Wheaton, 25–55" /></label>
+          <label className="block text-xs font-medium text-stone-600">Ad link for the seller (optional)<input type="url" maxLength={600} className={`${inputCls} ${errorBorder(errors.adLink)}`} value={f.adLink} onChange={set("adLink")} placeholder="https://…" />{fe("adLink")}</label>
+          <label className="block text-xs font-medium text-stone-600">Note for the seller (optional)<textarea maxLength={400} className={`${inputCls} min-h-[60px] ${errorBorder(errors.note)}`} value={f.note} onChange={set("note")} placeholder="Targeting buyers in Naperville & Wheaton, 25–55" />{fe("note")}</label>
           <div className="flex gap-2">
-            <button className="rounded-xl bg-[#9C7434] px-5 py-2 text-sm font-semibold text-white">Save {c.name.split(" ")[0]}</button>
-            <button type="button" onClick={() => { setF(blank()); setOpen(false); }} className="rounded-xl px-4 py-2 text-sm ring-1 ring-stone-200">Cancel</button>
+            <button disabled={busy} className="inline-flex items-center gap-1.5 rounded-xl bg-[#9C7434] px-5 py-2 text-sm font-semibold text-white disabled:opacity-60">{busy && <Loader2 className="size-4 animate-spin" />}{busy ? "Saving…" : `Save ${c.name.split(" ")[0]}`}</button>
+            <button type="button" onClick={() => { setF(blank()); setErrors({}); setOpen(false); }} className="rounded-xl px-4 py-2 text-sm ring-1 ring-stone-200">Cancel</button>
           </div>
         </form>
       )}
@@ -235,9 +269,8 @@ function ManualCard({ listingId, channel, row, street }: { listingId: Id<"listin
   );
 }
 
-function WebsiteCard({ listingId, row, match, refreshing }: { listingId: Id<"listings">; row?: Row; match: { patterns: string[]; by: string[]; offSite?: string }; refreshing: boolean }) {
+function WebsiteCard({ row, match, refreshing, connected }: { row?: Row; match: { patterns: string[]; by: string[]; offSite?: string }; refreshing: boolean; connected: boolean }) {
   const c = CHANNELS.website;
-  const refresh = useMutation(api.listingAds.requestWebRefresh);
   const hasData = !!row && row.updatedAt > 0;
   const startDate = row?.startDate;
   return (
@@ -252,14 +285,17 @@ function WebsiteCard({ listingId, row, match, refreshing }: { listingId: Id<"lis
         </div>
         <button
           aria-label="Refresh website numbers"
-          disabled={refreshing || !match.patterns.length}
-          onClick={() => refresh({ id: listingId }).then(r => toast.success(r.started ? "Checking Google Analytics…" : "Just updated. Try again in a few minutes.")).catch(e => toast.error(errMsg(e)))}
+          disabled={refreshing || !match.patterns.length || !connected}
+          title={connected ? "Refresh" : "Google Analytics isn't connected yet"}
+          onClick={() => toast.message("Google Analytics isn't connected yet.")}
           className="grid size-9 place-items-center rounded-full ring-1 ring-stone-200 disabled:opacity-40"
         >
           {refreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
         </button>
       </div>
-      {!match.patterns.length ? (
+      {!connected ? (
+        <p className="mt-3 text-sm text-stone-600">Website visits come from Google Analytics, which isn't connected to the new Hub yet. They'll fill in by themselves once it is.</p>
+      ) : !match.patterns.length ? (
         <p className="mt-3 text-sm text-stone-600">Add the MLS # or the property website link in <b>Details</b> and this fills in by itself.</p>
       ) : hasData ? (
         <>
@@ -287,16 +323,18 @@ function WebsiteCard({ listingId, row, match, refreshing }: { listingId: Id<"lis
   );
 }
 
-export function AgentAdCampaigns({ listingId }: { listingId: Id<"listings"> }) {
-  const data = useAdsData(listingId);
-  if (data === undefined) return <div className="h-40 animate-pulse rounded-2xl bg-stone-100" />;
+export function AgentAdCampaigns({ listingId }: { listingId: string }) {
+  const { data, error, reload } = useAdsData(listingId);
+  if (data === undefined && error) return <LoadError error={error} onRetry={() => void reload()} what="ad campaigns" />;
+  if (data === undefined) return <Skeleton label="Loading ad campaigns and web reporting" rows={2} />;
   const by = (ch: string) => data.rows.find(r => r.channel === ch);
   return (
     <div className="space-y-3">
       <div className="rounded-2xl bg-[#9C7434]/10 p-3 text-sm text-stone-700 ring-1 ring-[#9C7434]/20">
-        Sellers see each campaign's status, dates, reach, clicks and leads on their page. <b>Spend and budget stay private.</b> Instagram/Facebook and Google numbers fill in by themselves; Lofty numbers are typed in weekly.
+        Sellers see each campaign's status, dates, reach, clicks and leads on their page. <b>Spend and budget stay private.</b> Type each campaign's numbers from its ads account; they'll fill in by themselves once Meta and Google Ads are connected.
       </div>
-      <WebsiteCard listingId={listingId} row={by("website")} match={data.webMatch} refreshing={data.webRefreshing} />
+      {data.rows.length === 0 && <p className="px-1 text-sm text-stone-600">No campaign or website results yet. Results will appear here as they come in.</p>}
+      <WebsiteCard row={by("website")} match={data.webMatch} refreshing={data.webRefreshing} connected={data.webConnected} />
       {(["meta", "google", "lofty"] as const).map(ch => <ManualCard key={ch} listingId={listingId} channel={ch} row={by(ch)} street={data.street} />)}
       {data.staff && (
         <p className="px-1 text-xs text-stone-500">Admin: Instagram/Facebook and Google cards read the SpaceMatch Meta Ads and Google Ads accounts twice a day. Lofty has no ads feed, so its numbers are typed in.</p>

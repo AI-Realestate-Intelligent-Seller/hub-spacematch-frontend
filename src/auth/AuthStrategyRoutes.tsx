@@ -1,5 +1,6 @@
 import { lazy, Suspense } from "react";
 import { ViktorEmbedBridge } from "@/components/ViktorEmbedBridge";
+import { Skeleton } from "@/components/hub/FormState";
 import {
   useViktorSpaceAccess,
   ViktorSpaceAccessProvider,
@@ -15,10 +16,6 @@ const AuthenticatedAppRoutes = lazy(() =>
     default: module.AuthenticatedAppRoutes,
   })),
 );
-
-function AuthStrategyLoading() {
-  return null;
-}
 
 export function AuthStrategyRoutes() {
   return (
@@ -36,5 +33,9 @@ function AuthStrategyRoutesInner() {
 
   const routes = authEnabled ? <AuthenticatedAppRoutes /> : <PublicAppRoutes />;
 
-  return <Suspense fallback={<AuthStrategyLoading />}>{routes}</Suspense>;
+  return (
+    <Suspense fallback={<main className="mx-auto max-w-6xl px-4 py-8"><Skeleton label="Loading the Hub" /></main>}>
+      {routes}
+    </Suspense>
+  );
 }

@@ -1,5 +1,5 @@
 // Plan card and Zillow/Reel status still read the old backend (later slices of Wave 3).
-import { useAction, useQuery } from "convex/react";
+import { useAction } from "convex/react";
 import { ArrowLeft, Check, ChevronDown, ClipboardPaste, Clapperboard, Copy, ExternalLink, Eye, EyeOff, FileBarChart, Mail, MailPlus, MessageSquare, RefreshCw, Send, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
@@ -10,13 +10,17 @@ import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { FieldError, StatusChip, ago, errMsg, fieldCls, inputCls } from "./ListingsPage";
 import { centsToPrice, check, detailsSchema, digitsOnly, eventSchema, orNull, priceToCents, rules, suggestionSchema, typeName, typePhone, typePrice } from "@/lib/listingForms";
-import { fieldErrors, type Listing, type ListingEvent, type ListingMetric, listingsApi, useListingsData } from "@/lib/listingsApi";
+import { fieldErrors, type Listing, type ListingEvent, type ListingMetric, listingsApi, type SocialPlatform, socialApi, supportsLegacyListing, useListingsData } from "@/lib/listingsApi";
 import { formatFreeAddress, formatPrice } from "../../convex/address";
 import { AgentAdCampaigns } from "../components/hub/AdCampaigns";
 import { ListingAdOrder } from "../components/hub/AdOrder";
 import { PlanBuilder } from "./ListingPlanPage";
+import { EmptyState, LoadError, Skeleton } from "@/components/hub/FormState";
+import { Skeleton as Placeholder } from "@/components/ui/skeleton";
+import { useLegacyQuery } from "@/auth/convexClient";
 
 type Tab = "steps" | "numbers" | "next" | "ads" | "activity" | "details";
+const TABS: [Tab, string][] = [["steps", "Launch steps"], ["numbers", "Weekly numbers"], ["next", "Next steps"], ["ads", "Ads & web"], ["activity", "Activity"], ["details", "Details"]];
 const wkLabel = (w: string) => new Date(`${w}T12:00:00Z`).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 const shiftWeek = (w: string, n: number) => new Date(new Date(`${w}T12:00:00Z`).getTime() + n * 7 * 864e5).toISOString().slice(0, 10);
 
@@ -86,8 +90,9 @@ function Connected({ l }: { l: Listing }) {
 
 // Neighborhood & marketing plan (Michael 2026-11-08): builds by itself for new listings.
 function PlanCard({ listingId }: { listingId: Id<"listings"> }) {
-  const d = useQuery(api.listingPlans.forListing, { listingId }); // old backend until the plan slice moves
-  if (!d) return null;
+  const d = useLegacyQuery(api.listingPlans.forListing, { listingId });
+  if (d instanceof Error) return <p className="rounded-2xl bg-white p-4 text-sm text-stone-600">The marketing plan is unavailable for this listing.</p>;
+  if (d === undefined) return <Skeleton label="Loading marketing plan" rows={1} />;
   const p = d.plan;
   const ready = p?.status === "ready" && p.plan;
   return (
@@ -136,16 +141,128 @@ const FIELDS = [
   ["mlsSaved", "MLS: favorite"],
   ["mlsMaybe", "MLS: maybe"],
   ["mlsNotInterested", "MLS: not interested"],
-  ["reelViews", "Reel views (optional)"],
 ] as const;
 type Metric = ListingMetric;
-const autoKind = (k: string) => (k.startsWith("zillow") ? "zillow" : k === "reelViews" ? "reel" : k === "youtubeViews" ? "youtube" : "");
-// The listing Reel on other channels: lifetime views (+ optional link). TikTok/Facebook have no feed.
+const AUTO_KIND: Record<string, string> = { reelViews: "reel", youtubeViews: "youtube", tiktokViews: "tiktok", fbViews: "facebook" };
+const autoKind = (k: string) => (k.startsWith("zillow") ? "zillow" : AUTO_KIND[k] ?? "");
+// The listing's videos: lifetime views. Filled by "Fetch views" (social card); typing is a fallback.
 const SOCIAL = [
-  ["tiktokViews", "TikTok views", "tiktokLink", "tiktok"],
-  ["fbViews", "Facebook views", "facebookLink", "facebook"],
-  ["youtubeViews", "YouTube Shorts views", "", "youtube"],
+  ["reelViews", "Instagram views"],
+  ["youtubeViews", "YouTube views"],
+  ["tiktokViews", "TikTok views"],
+  ["fbViews", "Facebook views"],
 ] as const;
+
+// ---------- Social video views (SpaceMatch Reels service) ----------
+
+const PLATFORMS: { key: SocialPlatform; label: string; ph: string; host: RegExp; path: RegExp; msg: string }[] = [
+  { key: "instagram", label: "Instagram Reel", ph: "https://www.instagram.com/reel/…", host: /(^|\.)instagram\.com$/i, path: /^\/(?:[\w.]+\/)?reels?\/[\w-]+/i, msg: "Use an Instagram Reel link, e.g. https://www.instagram.com/reel/ABC123/" },
+  { key: "youtube", label: "YouTube", ph: "https://youtube.com/shorts/…", host: /(^|\.)(youtube\.com|youtu\.be)$/i, path: /^\/(shorts\/[\w-]+|watch|[\w-]{6,})/i, msg: "Use a YouTube video or Shorts link, e.g. https://youtube.com/shorts/ABC123" },
+  { key: "tiktok", label: "TikTok", ph: "https://www.tiktok.com/@name/video/…", host: /(^|\.)tiktok\.com$/i, path: /^\/(@[\w.-]+\/video\/\d+|[\w-]+\/?$)/i, msg: "Use a TikTok video link, e.g. https://www.tiktok.com/@name/video/123" },
+  { key: "facebook", label: "Facebook", ph: "https://www.facebook.com/reel/…", host: /(^|\.)(facebook\.com|fb\.watch)$/i, path: /^\/(reel\/|share\/(r|v)\/|watch|[\w.-]+\/videos\/|[\w-]+\/?$)/i, msg: "Use a Facebook Reel or video link, e.g. https://www.facebook.com/reel/123" },
+];
+const checkSocialLink = (p: (typeof PLATFORMS)[number], v: string) => {
+  if (!v) return "";
+  try {
+    const u = new URL(v);
+    if (u.protocol !== "https:") return "Use a full link starting with https://";
+    return p.host.test(u.hostname) && p.path.test(u.pathname + (u.search ? "?" : "")) ? "" : p.msg;
+  } catch {
+    return p.msg;
+  }
+};
+const compact = (n?: number) => (n == null ? "N/A" : n >= 1e6 ? `${(n / 1e6).toFixed(1).replace(/\.0$/, "")}M` : n >= 1e4 ? `${(n / 1e3).toFixed(1).replace(/\.0$/, "")}K` : n.toLocaleString());
+
+function SocialStats({ l }: { l: Listing }) {
+  const { data, error, reload } = useListingsData(`listings:social:${l._id}`, () => socialApi.get(l._id));
+  const [links, setLinks] = useState<Record<SocialPlatform, string> | null>(null);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  // Start from the saved links (the Instagram one is the Reel link from Details).
+  useEffect(() => {
+    if (data && links === null) setLinks({ instagram: data.links.instagram ?? "", youtube: data.links.youtube ?? "", tiktok: data.links.tiktok ?? "", facebook: data.links.facebook ?? "" });
+  }, [data, links]);
+  // The Reel link changed in Details: update only the Instagram box (keep what's typed in the others).
+  useEffect(() => { setLinks(cur => (cur ? { ...cur, instagram: l.links?.reel ?? "" } : cur)); }, [l.links?.reel]);
+  if (data === undefined) return error ? <LoadError error={error} onRetry={() => void reload()} what="social views" /> : <Skeleton label="Loading social views" rows={1} />;
+  const v = links ?? { instagram: data.links.instagram ?? "", youtube: data.links.youtube ?? "", tiktok: data.links.tiktok ?? "", facebook: data.links.facebook ?? "" };
+  const setLink = (k: SocialPlatform, value: string) => {
+    setLinks({ ...v, [k]: value.trim() });
+    if (errors[k]) setErrors(e => ({ ...e, [k]: "" }));
+  };
+  /** Leaving a box saves that link (if it's valid and changed), so it stays until the agent changes it. */
+  const saveLink = (p: (typeof PLATFORMS)[number]) => {
+    const value = v[p.key];
+    const err = checkSocialLink(p, value);
+    setErrors(x => ({ ...x, [p.key]: err }));
+    if (err || value === (data.links[p.key] ?? "")) return;
+    socialApi
+      .saveLinks(l._id, { [p.key]: value || null })
+      .then(() => toast.success(value ? `${p.label} link saved` : `${p.label} link removed`))
+      .catch(e => {
+        setErrors(x => ({ ...x, ...fieldErrors(e) }));
+        toast.error(errMsg(e));
+      });
+  };
+  const fetchNow = async () => {
+    const errs = Object.fromEntries(PLATFORMS.map(p => [p.key, checkSocialLink(p, v[p.key])]).filter(([, m]) => m));
+    setErrors(errs);
+    if (Object.keys(errs).length) return;
+    if (!PLATFORMS.some(p => v[p.key]) && !PLATFORMS.some(p => data.links[p.key])) return toast.error("Add at least one video link first.");
+    setBusy(true);
+    setNotice(null);
+    try {
+      const r = await socialApi.fetch(l._id, { instagram: v.instagram || null, youtube: v.youtube || null, tiktok: v.tiktok || null, facebook: v.facebook || null });
+      setNotice(r.notice ?? null);
+      const failed = r.stats.filter(s => s.url && s.status !== "ok");
+      toast.success(failed.length ? `Views updated. ${failed.length} link${failed.length > 1 ? "s" : ""} couldn't be read.` : "Views updated. Your seller sees them now.");
+    } catch (e) {
+      setErrors(fieldErrors(e));
+      toast.error(errMsg(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const stat = (k: SocialPlatform) => data.stats.find(s => s.platform === k);
+  return (
+    <section className="rounded-2xl bg-white p-4 ring-1 ring-black/5" data-testid="social-stats">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <h3 className="font-semibold">Social video views</h3>
+          <p className="text-[15px] text-stone-600">Paste the listing's video links and tap <b>Fetch views</b>. The views go into this week's numbers and your seller's page.</p>
+        </div>
+        {data.lastSyncedAt && <span className="text-xs text-stone-500">Last fetched {ago(data.lastSyncedAt)}</span>}
+      </div>
+      {!data.connected && (
+        <p className="mt-3 rounded-xl bg-amber-50 p-3 text-sm text-amber-900 ring-1 ring-amber-200">Fetching views isn't switched on yet: an admin needs to add the Reels service key. Links you add are still saved (each one saves when you leave its box), and you can type the views below.</p>
+      )}
+      <div className="mt-3 space-y-3">
+        {PLATFORMS.map(p => {
+          const st = stat(p.key);
+          return (
+            <div key={p.key} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_150px] sm:items-start">
+              <label className="block text-sm font-medium text-stone-700">{p.label}{p.key === "instagram" && <span className="font-normal text-stone-400"> · same as Instagram Reel in Details</span>}
+                <input type="url" inputMode="url" maxLength={600} aria-invalid={!!errors[p.key]} className={fieldCls(errors[p.key])} placeholder={p.ph} value={v[p.key]} onChange={e => setLink(p.key, e.target.value)} onBlur={() => saveLink(p)} />
+                <FieldError msg={errors[p.key]} />
+              </label>
+              <div className="rounded-xl bg-stone-50 px-3 py-2 sm:mt-5" aria-live="polite">
+                <div className="font-display text-xl leading-none text-[#0A0A0A]">{st?.url ? compact(st.views) : "–"}</div>
+                <div className="mt-1 text-[11px] text-stone-500">
+                  {!st?.url ? "views" : st.status === "invalid" ? <span className="text-red-600">Link no longer available</span> : st.status === "stale" ? <span className="text-amber-700" title={st.error}>Couldn't update · showing last</span> : st.okAt ? `views · as of ${ago(st.okAt)}` : "Fetching…"}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {notice && <p className="mt-3 text-sm text-stone-600">{notice}</p>}
+      <button type="button" onClick={fetchNow} disabled={busy || !data.connected} className="mt-4 inline-flex items-center gap-2 rounded-xl bg-[#9C7434] px-5 py-2.5 text-sm font-semibold text-white disabled:opacity-50">
+        {busy ? <><RefreshCw className="size-4 animate-spin" /> Fetching… this can take a minute</> : <><RefreshCw className="size-4" /> Fetch views</>}
+      </button>
+    </section>
+  );
+}
 
 function CopyChip({ text }: { text: string }) {
   return (
@@ -186,9 +303,10 @@ function ForwardHelp({ myEmail }: { myEmail: string }) {
 }
 
 function AutoSources({ l, myEmail }: { l: Listing; myEmail: string }) {
-  const z = useQuery(api.zillow.forListing, { id: l._id as Id<"listings"> }); // old backend until the Zillow slice moves
+  const z = useLegacyQuery(api.zillow.forListing, { id: l._id as Id<"listings"> });
   const [open, setOpen] = useState(false);
-  if (!z) return null;
+  if (z instanceof Error) return <p className="rounded-2xl bg-white p-4 text-sm text-stone-600">Automatic source details are unavailable. You can still enter the weekly numbers above.</p>;
+  if (z === undefined) return <Skeleton label="Loading automatic sources" rows={1} />;
   const lastDay = z.days[0];
   const street = l.address.split(",")[0];
   return (
@@ -239,20 +357,13 @@ function Numbers({ l, metrics, thisWeek, myEmail }: { l: Listing; metrics: Metri
   const isAuto = (k: string) => !!cur?.auto?.includes(autoKind(k));
   const [vals, setVals] = useState<Record<string, string>>({});
   useEffect(() => {
-    setVals({
-      ...Object.fromEntries([...FIELDS, ...SOCIAL].map(([k]) => [k, cur?.[k] != null ? String(cur[k]) : ""])),
-      tiktokLink: l.links?.tiktok ?? "", facebookLink: l.links?.facebook ?? "",
-    });
-  }, [wk, cur?._id, cur?.updatedAt, l.links?.tiktok, l.links?.facebook]);
+    setVals(Object.fromEntries([...FIELDS, ...SOCIAL].map(([k]) => [k, cur?.[k] != null ? String(cur[k]) : ""])));
+  }, [wk, cur?._id, cur?.updatedAt]);
   const validate = (v: Record<string, string>) => {
     const errs: Record<string, string> = {};
     for (const [k] of [...FIELDS, ...SOCIAL]) {
       const r = rules.count.safeParse(v[k] ?? "");
       if (!r.success) errs[k] = r.error.issues[0]?.message ?? "Use a whole number.";
-    }
-    for (const k of ["tiktokLink", "facebookLink"]) {
-      const r = rules.httpsUrl.safeParse((v[k] ?? "").trim());
-      if (!r.success) errs[k] = r.error.issues[0]?.message ?? "Use a full link starting with https://";
     }
     return errs;
   };
@@ -270,7 +381,7 @@ function Numbers({ l, metrics, thisWeek, myEmail }: { l: Listing; metrics: Metri
     for (const [k] of [...FIELDS, ...SOCIAL]) n[k] = vals[k] === "" || vals[k] == null ? null : Number(vals[k]);
     setBusy(true);
     try {
-      await listingsApi.saveMetrics(l._id, wk, { ...n, tiktokLink: orNull(vals.tiktokLink ?? ""), facebookLink: orNull(vals.facebookLink ?? "") });
+      await listingsApi.saveMetrics(l._id, wk, n);
       toast.success("Saved. Your seller sees it now.");
     } catch (err) {
       setErrors(fieldErrors(err));
@@ -281,13 +392,14 @@ function Numbers({ l, metrics, thisWeek, myEmail }: { l: Listing; metrics: Metri
   };
   return (
     <div className="space-y-4">
+      <SocialStats l={l} />
       <form onSubmit={submit} noValidate className="rounded-2xl bg-white p-4 ring-1 ring-black/5">
         <div className="flex items-center justify-between">
           <button type="button" onClick={() => { setWk(shiftWeek(wk, -1)); setErrors({}); }} className="rounded-full px-3 py-1 text-sm ring-1 ring-stone-200">‹</button>
           <div className="text-center"><div className="text-xs text-stone-500">Week of</div><div className="font-semibold">{wkLabel(wk)}{wk === thisWeek && " (this week)"}</div></div>
           <button type="button" disabled={wk >= thisWeek} onClick={() => { setWk(shiftWeek(wk, 1)); setErrors({}); }} className="rounded-full px-3 py-1 text-sm ring-1 ring-stone-200 disabled:opacity-30">›</button>
         </div>
-        <p className="mt-3 text-[15px] text-stone-600">Type the connectMLS numbers (favorite / maybe / not interested). Zillow and Reel numbers fill in by themselves once connected below. About 30 seconds.</p>
+        <p className="mt-3 text-[15px] text-stone-600">Type the connectMLS numbers (favorite / maybe / not interested). Video views fill in from <b>Fetch views</b> above. About 30 seconds.</p>
         <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
           {FIELDS.map(([k, label]) => (
             <label key={k} className="block text-xs font-medium text-stone-600">{label}{isAuto(k) && <span className="ml-1 font-semibold text-emerald-700">· auto</span>}
@@ -297,31 +409,25 @@ function Numbers({ l, metrics, thisWeek, myEmail }: { l: Listing; metrics: Metri
           ))}
         </div>
         <div className="mt-4 border-t border-stone-100 pt-3" data-testid="social-fields">
-          <div className="font-medium">Reel on other channels (optional)</div>
-          <p className="text-[15px] text-stone-600">Total views so far, from the TikTok or Facebook app. YouTube fills in by itself when the Short has the street in its title.</p>
-          <div className="mt-2 space-y-2">
-            {SOCIAL.map(([k, label, linkKey]) => (
-              <div key={k} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)] gap-2">
-                <label className="block text-sm font-medium text-stone-600">{label}{isAuto(k) && <span className="ml-1 font-semibold text-emerald-700">· auto</span>}
-                  <input aria-label={label} className={fieldCls(errors[k], isAuto(k) ? "bg-stone-50 text-stone-500" : "")} inputMode="numeric" maxLength={8} readOnly={isAuto(k)} value={vals[k] ?? ""} onChange={e => setVal(k, digitsOnly(e.target.value, 8))} aria-invalid={!!errors[k]} />
-                  <FieldError msg={errors[k]} />
-                </label>
-                {linkKey ? (
-                  <label className="block text-sm font-medium text-stone-600">Link
-                    <input aria-label={`${label.split(" ")[0]} link`} type="url" maxLength={600} className={fieldCls(errors[linkKey])} placeholder="https://…" value={vals[linkKey] ?? ""} onChange={e => setVal(linkKey, e.target.value.trim())} aria-invalid={!!errors[linkKey]} />
-                    <FieldError msg={errors[linkKey]} />
-                  </label>
-                ) : (
-                  <p className="self-end pb-2 text-sm text-stone-500">{l.ytAuto ? <>Auto from <a className="font-semibold text-[#7A5A25] underline" href={l.ytAuto.url} target="_blank" rel="noreferrer">the Short</a>, twice a day</> : "Auto once matched; or type it"}</p>
-                )}
-              </div>
+          <div className="font-medium">Video views (lifetime)</div>
+          <p className="text-[15px] text-stone-600">Filled in by <b>Fetch views</b> and locked as “auto”. If a platform has no link, you can type its views from the app.</p>
+          <div className="mt-2 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {SOCIAL.map(([k, label]) => (
+              <label key={k} className="block text-xs font-medium text-stone-600">{label}{isAuto(k) && <span className="ml-1 font-semibold text-emerald-700">· auto</span>}
+                <input aria-label={label} className={fieldCls(errors[k], isAuto(k) ? "bg-stone-50 text-stone-500" : "")} inputMode="numeric" maxLength={8} readOnly={isAuto(k)} title={isAuto(k) ? "Filled in by Fetch views" : undefined} value={vals[k] ?? ""} onChange={e => setVal(k, digitsOnly(e.target.value, 8))} aria-invalid={!!errors[k]} />
+                <FieldError msg={errors[k]} />
+              </label>
             ))}
           </div>
         </div>
         <button disabled={busy} className="mt-4 w-full rounded-xl bg-[#0A0A0A] py-2.5 font-semibold text-white disabled:opacity-60 sm:w-auto sm:px-6">{busy ? "Saving…" : "Save week"}</button>
       </form>
-      <AutoSources l={l} myEmail={myEmail} />
-      {metrics.length > 0 && (
+      {supportsLegacyListing(l._id) && <AutoSources l={l} myEmail={myEmail} />}
+      {metrics.length === 0 ? (
+        <EmptyState icon={<FileBarChart className="size-8" />} title="No weekly numbers yet">
+          Save the first week to start tracking this listing’s performance.
+        </EmptyState>
+      ) : (
         <div className="overflow-x-auto rounded-2xl bg-white ring-1 ring-black/5">
           <table className="w-full text-sm">
             <thead><tr className="text-left text-xs text-stone-500"><th className="p-3">Week</th>{FIELDS.slice(0, 5).map(([, lb]) => <th key={lb} className="p-3">{lb}</th>)}</tr></thead>
@@ -338,14 +444,17 @@ function Numbers({ l, metrics, thisWeek, myEmail }: { l: Listing; metrics: Metri
 }
 
 function NextStepsEditor({ l }: { l: Listing }) {
-  const rows = useListingsData(`listings:suggestions:${l._id}`, () => listingsApi.suggestions(l._id)).data?.items;
+  const { data, error, reload } = useListingsData(`listings:suggestions:${l._id}`, () => listingsApi.suggestions(l._id));
   const edit = ({ suggestionId, ...t }: { suggestionId: string; title: string; why: string; action: string }) => listingsApi.updateSuggestion(suggestionId, t);
   const setStatus = ({ suggestionId, status }: { suggestionId: string; status: "draft" | "published" | "dismissed" }) => listingsApi.updateSuggestion(suggestionId, { status });
   const [drafts, setDrafts] = useState<Record<string, { title: string; why: string; action: string }>>({});
   const [nw, setNw] = useState({ title: "", why: "", action: "" });
   const [errors, setErrors] = useState<Record<string, string>>({});
   useEffect(() => { void listingsApi.refreshSuggestions(l._id).catch(() => {}); }, [l._id, l.updatedAt]);
-  if (rows === undefined) return <div className="h-24 animate-pulse rounded-2xl bg-stone-100" />;
+  if (data === undefined) return error
+    ? <LoadError error={error} onRetry={() => void reload()} what="suggestions" />
+    : <Skeleton label="Loading suggestions" rows={2} />;
+  const rows = data.items;
   const val = (r: (typeof rows)[number]) => drafts[r._id] ?? { title: r.title, why: r.why, action: r.action };
   const act = async (fn: () => Promise<unknown>, ok: string) => { try { await fn(); toast.success(ok); return true; } catch (e) { toast.error(errMsg(e)); return false; } };
   /** Checks one suggestion's text; errors are keyed "<id>.title" etc. */
@@ -496,7 +605,7 @@ function Activity({ l, events, openHouse }: { l: Listing; events: ListingEvent[]
       <section className="rounded-2xl bg-white p-4 ring-1 ring-black/5">
         <h3 className="font-semibold">Open house sign-ins ({openHouse.length})</h3>
         <p className="text-xs text-stone-500">From the Open House QR form with this address. Sellers see the count only.</p>
-        {openHouse.length > 0 && <ul className="mt-2 text-sm">{openHouse.map(o => <li key={o._id} className="flex justify-between border-t border-stone-100 py-1.5"><span>{o.name}</span><span className="text-stone-500">{ago(o.at)}</span></li>)}</ul>}
+        {openHouse.length === 0 ? <p className="mt-2 text-sm text-stone-500">No sign-ins yet.</p> : <ul className="mt-2 text-sm">{openHouse.map(o => <li key={o._id} className="flex justify-between border-t border-stone-100 py-1.5"><span>{o.name}</span><span className="text-stone-500">{ago(o.at)}</span></li>)}</ul>}
         <Link to="/forms" className="mt-2 inline-block text-sm font-semibold text-[#9C7434]">Get the open house QR →</Link>
       </section>
 
@@ -658,10 +767,22 @@ export function ListingDetailPage() {
   if (data === undefined && error) return (
     <div className="rounded-2xl bg-red-50 p-4 text-sm text-red-700 ring-1 ring-red-200">Couldn't load this listing. {errMsg(error)} <button type="button" onClick={() => void reload()} className="ml-1 font-semibold underline">Try again</button></div>
   );
-  if (data === undefined) return <div className="h-40 animate-pulse rounded-2xl bg-stone-100" />;
+  if (data === undefined) return (
+    <div className="space-y-4" role="status" aria-busy="true" aria-label="Loading listing details">
+      <Placeholder className="h-4 w-20 bg-stone-200" />
+      <Placeholder className="h-8 w-64 max-w-full bg-stone-200" />
+      <Placeholder className="h-4 w-44 bg-stone-200" />
+      <Placeholder className="h-36 rounded-2xl bg-stone-200" />
+      <Placeholder className="h-24 rounded-2xl bg-stone-200" />
+      <div className="flex gap-2 overflow-hidden">
+        {TABS.map(([key]) => <Placeholder key={key} className="h-9 w-24 shrink-0 rounded-full bg-stone-200" />)}
+      </div>
+      <Placeholder className="h-40 rounded-2xl bg-stone-200" />
+    </div>
+  );
   const { listing: l, events, metrics, openHouse, thisWeek } = data;
   const pending = events.filter(e => e.status === "pending").length;
-  const tabs: [Tab, string][] = [["steps", "Launch steps"], ["numbers", "Weekly numbers"], ["next", "Next steps"], ["ads", "Ads & web"], ["activity", pending ? `Activity (${pending})` : "Activity"], ["details", "Details"]];
+  const legacyTools = supportsLegacyListing(l._id);
   return (
     <div className="space-y-4">
       <Link to="/listings" className="inline-flex items-center gap-1 text-sm text-stone-500"><ArrowLeft className="size-4" /> Listings</Link>
@@ -693,16 +814,16 @@ export function ListingDetailPage() {
       </div>
       <SellerLink l={l} />
       <Connected l={l} />
-      <PlanCard listingId={l._id as Id<"listings">} />
-      <div className="flex gap-1 overflow-x-auto rounded-full bg-stone-100 p-1 text-sm">
-        {tabs.map(([k, label]) => (
-          <button key={k} onClick={() => setTab(k)} className={`shrink-0 rounded-full px-4 py-1.5 ${tab === k ? "bg-white font-semibold shadow-sm" : "text-stone-600"}`}>{label}</button>
+      {legacyTools && <PlanCard listingId={l._id as Id<"listings">} />}
+      <div className="flex gap-1 overflow-x-auto rounded-full bg-stone-100 p-1 text-sm [scrollbar-width:none]">
+        {TABS.map(([k, label]) => (
+          <button key={k} onClick={() => setTab(k)} className={`shrink-0 rounded-full px-4 py-1.5 ${tab === k ? "bg-white font-semibold shadow-sm" : "text-stone-600"}`}>{k === "activity" && pending ? `${label} (${pending})` : label}</button>
         ))}
       </div>
       {tab === "steps" && <Steps l={l} />}
       {tab === "numbers" && <Numbers l={l} metrics={metrics} thisWeek={thisWeek} myEmail={data.me.email} />}
       {tab === "next" && <NextStepsEditor l={l} />}
-      {tab === "ads" && <><ListingAdOrder listingId={l._id as Id<"listings">} /><AgentAdCampaigns listingId={l._id as Id<"listings">} /></>}
+      {tab === "ads" && <div className="space-y-4"><ListingAdOrder listingId={l._id} /><AgentAdCampaigns listingId={l._id} /></div>}
       {tab === "activity" && <Activity l={l} events={events} openHouse={openHouse} />}
       {tab === "details" && <Details key={l._id} l={l} />}
     </div>

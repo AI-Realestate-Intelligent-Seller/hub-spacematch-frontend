@@ -1,9 +1,21 @@
-import { useMutation, useQuery } from "convex/react";
-import { Bell, BellOff, ExternalLink, Megaphone, Pin, PinOff, Send, Share2, Trash2 } from "lucide-react";
+import { Bell, BellOff, ExternalLink, Loader2, Megaphone, Pin, PinOff, Send, Share2, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { toast } from "sonner";
-import { api } from "../../convex/_generated/api";
+import { EmptyState, FieldError, LoadError, Skeleton, errorBorder } from "@/components/hub/FormState";
+import { announcementsApi } from "@/lib/announcementsApi";
+import { apiErrorMessage, fieldErrors, useApiData } from "@/lib/apiData";
+import { check, fieldRules, orNull } from "@/lib/formRules";
+import { z } from "zod";
+
+const useAnnouncements = () => useApiData("announcements", () => announcementsApi.list(), { pollMs: 120_000 });
+const MAX_BODY = 4000;
+/** Same rules as the backend (announcement.validation.ts). */
+const postSchema = z.object({
+  title: fieldRules.text(140, "Headline"),
+  body: z.string().trim().min(1, "Write something first.").max(MAX_BODY, `The announcement is too long (${MAX_BODY} characters max).`),
+  link: fieldRules.website,
+});
 
 const ago = (t: number) => {
   const m = Math.round((Date.now() - t) / 60000);
@@ -22,8 +34,8 @@ const b64ToBytes = (b64: string) => {
 };
 
 function usePush(vapidKey: string | null | undefined) {
-  const subscribe = useMutation(api.announcements.subscribe);
-  const unsubscribe = useMutation(api.announcements.unsubscribe);
+  const subscribe = announcementsApi.subscribe;
+  const unsubscribe = ({ endpoint }: { endpoint: string }) => announcementsApi.unsubscribe(endpoint);
   const supported = typeof window !== "undefined" && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
   const [on, setOn] = useState<boolean | null>(null);
   useEffect(() => {
@@ -38,7 +50,7 @@ function usePush(vapidKey: string | null | undefined) {
     await navigator.serviceWorker.ready;
     const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(vapidKey) });
     const j = sub.toJSON();
-    await subscribe({ endpoint: sub.endpoint, p256dh: j.keys?.p256dh ?? "", auth: j.keys?.auth ?? "" });
+    await subscribe({ endpoint: sub.endpoint, p256dh: j.keys?.p256dh ?? "", auth: j.keys?.auth ?? "" }).catch(e => { toast.error(apiErrorMessage(e)); throw e; });
     setOn(true);
     toast.success("Notifications on for this phone.");
   };
@@ -52,32 +64,53 @@ function usePush(vapidKey: string | null | undefined) {
 }
 
 function Composer({ initial }: { initial: { title: string; body: string } }) {
-  const post = useMutation(api.announcements.post);
+  const [errors, setErrors] = useState<Record<string, string>>({});
   const [title, setTitle] = useState(initial.title);
   const [body, setBody] = useState(initial.body);
   const [link, setLink] = useState("");
   const [pinned, setPinned] = useState(false);
   const [busy, setBusy] = useState(false);
-  const inputCls = "w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5 text-[15px]";
+  const inputCls = "w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5 text-[15px] outline-none focus:border-[#9C7434] focus:ring-2 focus:ring-[#9C7434]/15";
+  const recheck = (next: { title: string; body: string; link: string }) => {
+    if (!Object.values(errors).some(Boolean)) return;
+    const e = check(postSchema, next);
+    setErrors(x => Object.fromEntries(Object.keys(x).map(k => [k, e[k] ?? ""])));
+  };
   const submit = async () => {
+    const errs = check(postSchema, { title, body, link });
+    setErrors(errs);
+    if (Object.keys(errs).length) return;
     setBusy(true);
     try {
-      await post({ title, body, link, pinned, notify: true });
-      setTitle(""); setBody(""); setLink(""); setPinned(false);
-      toast.success("Posted. Agents with notifications on will get it now.");
-    } catch (e) { toast.error(e instanceof Error ? e.message : "Couldn't post"); }
-    setBusy(false);
+      await announcementsApi.post({ title: orNull(title), body: body.trim(), link: orNull(link), pinned, notify: true });
+      setTitle(""); setBody(""); setLink(""); setPinned(false); setErrors({});
+      toast.success("Posted. The whole team sees it now.");
+    } catch (e) {
+      setErrors(fieldErrors(e));
+      toast.error(apiErrorMessage(e));
+    } finally {
+      setBusy(false);
+    }
   };
   return (
     <section className="rounded-2xl bg-white p-4 ring-1 ring-[#ebe5da] space-y-3">
       <div className="flex items-center gap-2 font-semibold"><Megaphone className="size-4 text-[#9C7434]" /> New announcement</div>
-      <input value={title} onChange={e => setTitle(e.target.value)} placeholder="Headline (optional)" className={inputCls} />
-      <textarea value={body} onChange={e => setBody(e.target.value)} rows={5} placeholder="Paste the WhatsApp post or write the announcement…" className={inputCls} />
-      <input value={link} onChange={e => setLink(e.target.value)} placeholder="Link (optional)" className={inputCls} />
+      <div>
+        <input value={title} maxLength={140} aria-label="Headline" aria-invalid={!!errors.title} onChange={e => { setTitle(e.target.value); recheck({ title: e.target.value, body, link }); }} placeholder="Headline (optional)" className={`${inputCls} ${errorBorder(errors.title)}`} />
+        <FieldError msg={errors.title} />
+      </div>
+      <div>
+        <textarea value={body} maxLength={MAX_BODY} aria-label="Announcement" aria-invalid={!!errors.body} onChange={e => { setBody(e.target.value); recheck({ title, body: e.target.value, link }); }} rows={5} placeholder="Paste the WhatsApp post or write the announcement…" className={`${inputCls} ${errorBorder(errors.body)}`} />
+        <div className="flex items-start justify-between gap-3"><FieldError msg={errors.body} /><span className="ml-auto mt-0.5 text-xs text-stone-400">{body.length}/{MAX_BODY}</span></div>
+      </div>
+      <div>
+        <input value={link} maxLength={300} inputMode="url" aria-label="Link" aria-invalid={!!errors.link} onChange={e => { setLink(e.target.value.trim()); recheck({ title, body, link: e.target.value.trim() }); }} placeholder="Link (optional), e.g. spacematchinc.com/news" className={`${inputCls} ${errorBorder(errors.link)}`} />
+        <FieldError msg={errors.link} />
+      </div>
       <div className="flex flex-wrap items-center gap-3">
         <label className="inline-flex items-center gap-2 text-sm text-stone-600"><input type="checkbox" checked={pinned} onChange={e => setPinned(e.target.checked)} /> Pin to top</label>
-        <button type="button" disabled={busy || !body.trim()} onClick={submit} className="ml-auto inline-flex items-center gap-2 rounded-xl bg-[#9C7434] px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50">
-          <Send className="size-4" /> Post + notify team
+        <button type="button" disabled={busy} onClick={submit} className="ml-auto inline-flex items-center gap-2 rounded-xl bg-[#9C7434] px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50">
+          {busy ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />} {busy ? "Posting…" : "Post to the team"}
         </button>
       </div>
     </section>
@@ -85,9 +118,14 @@ function Composer({ initial }: { initial: { title: string; body: string } }) {
 }
 
 export function AnnouncementsPage() {
-  const data = useQuery(api.announcements.list);
-  const remove = useMutation(api.announcements.remove);
-  const setPin = useMutation(api.announcements.setPinned);
+  const { data, error, reload } = useAnnouncements();
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const run = (id: string, fn: () => Promise<unknown>, ok: string) => {
+    setBusyId(id);
+    fn().then(() => toast.success(ok)).catch(e => toast.error(apiErrorMessage(e))).finally(() => setBusyId(null));
+  };
+  const setPin = ({ id, pinned }: { id: string; pinned: boolean }) => run(id, () => announcementsApi.setPinned(id, pinned), pinned ? "Pinned to the top" : "Unpinned");
+  const remove = ({ id }: { id: string }) => run(id, () => announcementsApi.remove(id), "Announcement deleted");
   const [params] = useSearchParams();
   const push = usePush(data?.vapidKey);
   const shared = [params.get("text"), params.get("url")].filter(Boolean).join("\n");
@@ -115,8 +153,12 @@ export function AnnouncementsPage() {
       {data?.canPost && (
         <p className="flex items-start gap-2 text-xs text-stone-500"><Share2 className="mt-0.5 size-3.5 shrink-0" /> From WhatsApp on Android: long-press a message → Share → SpaceMatch. On iPhone: copy it and paste it here.</p>
       )}
-      {data === undefined && <p className="text-sm text-stone-500">Loading…</p>}
-      {data && data.rows.length === 0 && <p className="rounded-2xl bg-white p-6 text-center text-sm text-stone-500 ring-1 ring-[#ebe5da]">No announcements yet.</p>}
+      {data === undefined && (error ? <LoadError error={error} onRetry={() => void reload()} what="announcements" /> : <Skeleton rows={3} className="h-28" />)}
+      {data && data.rows.length === 0 && (
+        <EmptyState icon={<Megaphone className="size-8" />} title="No announcements yet">
+          {data.canPost ? "Post the first one above. The whole team sees it here and on Home." : "Team news from leaders and ops shows up here."}
+        </EmptyState>
+      )}
       <div className="space-y-3">
         {data?.rows.map(a => (
           <article key={a._id} className={`rounded-2xl bg-white p-4 ring-1 ${a.pinned ? "ring-[#9C7434]" : "ring-[#ebe5da]"}`}>
@@ -125,8 +167,9 @@ export function AnnouncementsPage() {
               <span className="font-semibold text-stone-700">{a.authorName}</span><span>· {ago(a.createdAt)}</span>
               {data.canPost && (
                 <span className="ml-auto flex gap-1">
-                  <button type="button" aria-label={a.pinned ? "Unpin" : "Pin"} onClick={() => setPin({ id: a._id, pinned: !a.pinned })} className="rounded-lg p-1.5 hover:bg-[#F7F5F1]">{a.pinned ? <PinOff className="size-4" /> : <Pin className="size-4" />}</button>
-                  <button type="button" aria-label="Delete" onClick={() => { if (confirm("Delete this announcement?")) remove({ id: a._id }).catch(e => toast.error(String(e))); }} className="rounded-lg p-1.5 hover:bg-[#F7F5F1]"><Trash2 className="size-4" /></button>
+                  {busyId === a._id && <Loader2 className="size-4 animate-spin self-center text-stone-400" />}
+                  <button type="button" disabled={busyId === a._id} aria-label={a.pinned ? "Unpin" : "Pin"} onClick={() => setPin({ id: a._id, pinned: !a.pinned })} className="rounded-lg p-1.5 hover:bg-[#F7F5F1] disabled:opacity-50">{a.pinned ? <PinOff className="size-4" /> : <Pin className="size-4" />}</button>
+                  <button type="button" disabled={busyId === a._id} aria-label="Delete" onClick={() => { if (confirm("Delete this announcement?")) remove({ id: a._id }); }} className="rounded-lg p-1.5 hover:bg-[#F7F5F1] disabled:opacity-50"><Trash2 className="size-4" /></button>
                 </span>
               )}
             </div>
@@ -141,7 +184,7 @@ export function AnnouncementsPage() {
 }
 
 export function AnnouncementsPreview() {
-  const data = useQuery(api.announcements.list);
+  const { data } = useAnnouncements();
   const rows = (data?.rows ?? []).slice(0, 2);
   // Hidden until there's a post (Michael 2026-10-18): an empty box looks unfinished.
   if (!data || rows.length === 0) return null;

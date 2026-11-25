@@ -19,6 +19,7 @@ import { SCRIPTS, TEMPLATES } from "@/lib/templates";
 import { api } from "../../../convex/_generated/api";
 import { useApiData } from "@/lib/apiData";
 import { rentalsApi } from "@/lib/rentalsApi";
+import { cmaApi } from "@/lib/cmaApi";
 import { vendorsApi } from "@/lib/vendorsApi";
 import { formatAddress } from "../../../convex/address";
 import { FORMS } from "../../../convex/formDefs";
@@ -241,7 +242,7 @@ export function GlobalSearch({ big = false }: { big?: boolean }) {
   const nav = useNavigate();
   const vendors = useApiData("vendors:list", () => vendorsApi.list()).data; // new backend
   const rentals = useApiData("rentals:list", () => rentalsApi.list()).data; // new backend
-  const requests = useQuery(api.cma.list);
+  const requests = useApiData("cma:list", () => cmaApi.list()).data; // new backend
   const inbox = useQuery(api.forms.inbox, {});
 
   const hits = useMemo<Hit[]>(() => {

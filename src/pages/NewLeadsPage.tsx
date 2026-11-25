@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import { toast } from "sonner";
 import { api } from "../../convex/_generated/api";
+import { useApiData } from "@/lib/apiData";
+import { cmaApi } from "@/lib/cmaApi";
 import { CALL_RESULTS, type Kind, PLAYBOOKS, TONE, annaTexting, nextStep, quickText } from "../../convex/leadTrackDefs";
 import { fmtWhen } from "../../convex/deskDefs";
 import { ago, errMsg, input, label } from "@/components/hub/DeskBits";
@@ -322,7 +324,7 @@ const money = (n: number | null) => (n ? `$${Math.round(n).toLocaleString("en-US
 /** CMA for this lead: started automatically on a "what's it worth / more info" reply, or by the button. */
 function CmaCard({ row }: { row: Row }) {
   const orderCma = useMutation(api.leadTrack.orderCma);
-  const me = useQuery(api.cma.me);
+  const me = useApiData("cma:me", () => cmaApi.me()).data; // new backend
   const [busy, setBusy] = useState(false);
   const c = row.cma;
   const order = () => {
