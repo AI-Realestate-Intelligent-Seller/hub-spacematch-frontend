@@ -295,7 +295,7 @@ export const MOMENTS: Moment[] = [
       {
         when: "Every week",
         steps: [
-          { text: "Open house: show the sign-in QR at the door. Visitors go straight into Lofty.", buttons: [{ label: "Sign-in QR", to: "/forms?open=open-house-signin", icon: ClipboardList }] },
+          { text: "Open house: show the sign-in QR at the door. Sign-ins go to the Hub inbox and update the seller page count.", buttons: [{ label: "Sign-in QR", to: "/forms?open=open-house-signin", icon: ClipboardList }] },
           { text: "Approve showing feedback on the listing's Activity tab before the seller sees it.", buttons: [{ label: "My listings", to: "/listings", icon: Home }] },
         ],
       },

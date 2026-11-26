@@ -2,13 +2,16 @@ import {
   DollarSign,
   Download,
   FileSpreadsheet,
+  FileText,
   Loader2,
   Pencil,
   Plus,
 } from "lucide-react";
 import { useState } from "react";
 import { LoadError } from "@/components/hub/FormState";
+import { ReportDownloadButton, ReportPreviewDialog, StatusPill } from "@/components/cma/shared";
 import { useApiData } from "@/lib/apiData";
+import { cmaBuilderApi, dateTime, type ListingCmaRequest } from "@/lib/cmaBuilderApi";
 import { cmaApi, cmaErrorMessage } from "@/lib/cmaApi";
 import { Link } from "react-router";
 import { formatAddress } from "../../convex/address";
@@ -212,8 +215,50 @@ const lz = (r: { reportType?: string; kind?: string }) =>
       : ("residential" as const)
     : undefined;
 
+function ListingRequestCard({ request }: { request: ListingCmaRequest }) {
+  const [preview, setPreview] = useState(false);
+  const canView = ["published", "superseded", "ready_for_review", "draft"].includes(request.status);
+  return (
+    <Card data-testid="request-row">
+      <CardContent className="flex flex-col gap-4 py-4 sm:flex-row sm:items-center">
+        <div className="min-w-0 flex-1 space-y-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-semibold">{request.address}</span>
+            <StatusPill status={request.status} />
+          </div>
+          <p className="text-sm text-muted-foreground">
+            {request.requestedByName} · submitted {dateTime(request.createdAt)} · version {request.version}
+          </p>
+          <p className="text-sm text-muted-foreground">Comparable source · {request.providerLabel}</p>
+        </div>
+        <div className="flex shrink-0 flex-wrap gap-2 sm:max-w-[16rem] sm:justify-end">
+          {canView && <>
+            <ReportDownloadButton load={(format, download) => cmaBuilderApi.pdf(request.id, format, download)} format="pdf" />
+            <ReportDownloadButton load={(format, download) => cmaBuilderApi.pdf(request.id, format, download)} format="pptx" />
+          </>}
+          {canView && (
+            <Button size="sm" variant="outline" onClick={() => setPreview(true)}>
+              <FileText className="size-4" /> View report
+            </Button>
+          )}
+          <Button size="sm" variant="ghost" asChild>
+            <Link to={`/listings/${request.listingId}/cma`}>Open CMA Builder</Link>
+          </Button>
+        </div>
+      </CardContent>
+      {canView && <ReportPreviewDialog open={preview} onOpenChange={setPreview} load={() => cmaBuilderApi.pdf(request.id)} title={`CMA report · version ${request.version}`} description="Uses the same report layout and included content as the downloaded seller PDF." />}
+    </Card>
+  );
+}
+
 export function RequestsPage() {
   const { data: rows, error, reload } = useApiData("cma:list", () => cmaApi.list(), { pollMs: 60_000 });
+  const builder = useApiData("cma:builder-requests", cmaBuilderApi.requests, { pollMs: 5000 });
+  const entries = [
+    ...(rows ?? []).map(row => ({ kind: "legacy" as const, row, at: row._creationTime })),
+    ...(builder.data ?? []).map(row => ({ kind: "builder" as const, row, at: Date.parse(row.createdAt) })),
+  ].sort((a, b) => b.at - a.at);
+  const loading = (rows === undefined && !error) || (builder.data === undefined && !builder.error);
   const me = useApiData("cma:me", () => cmaApi.me()).data;
   const [priceTarget, setPriceTarget] = useState<PriceTarget | null>(null);
 
@@ -240,15 +285,15 @@ export function RequestsPage() {
         </div>
       </div>
 
-      {rows === undefined && error ? (
-        <LoadError error={error} onRetry={() => void reload()} what="your CMA requests" />
-      ) : rows === undefined ? (
+      {rows === undefined && error && <LoadError error={error} onRetry={() => void reload()} what="your full-form CMA requests" />}
+      {builder.data === undefined && builder.error && <LoadError error={builder.error} onRetry={() => void builder.reload()} what="your listing CMA requests" />}
+      {entries.length === 0 && loading ? (
         <div className="space-y-3">
           <Skeleton className="h-24" />
           <Skeleton className="h-24" />
         </div>
-      ) : rows.length === 0 ? (
-        <Card>
+      ) : entries.length === 0 ? (
+        !error && !builder.error && <Card>
           <CardContent className="py-12 text-center text-muted-foreground">
             No requests yet.{" "}
             <Link to="/new" className="text-primary underline">
@@ -259,10 +304,12 @@ export function RequestsPage() {
         </Card>
       ) : (
         <div className="space-y-3">
-          {rows.map(r => {
+          {entries.map(entry => {
+            if (entry.kind === "builder") return <ListingRequestCard key={`builder-${entry.row.id}`} request={entry.row} />;
+            const r = entry.row;
             const s = STATUS[r.status] ?? STATUS.submitted;
             return (
-              <Card key={r._id} data-testid="request-row">
+              <Card key={`legacy-${r._id}`} data-testid="request-row">
                 <CardContent className="py-4 flex flex-col sm:flex-row sm:items-center gap-4">
                   <div className="flex-1 min-w-0 space-y-1">
                     <div className="flex items-center gap-2 flex-wrap">

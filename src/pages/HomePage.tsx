@@ -1,3 +1,4 @@
+import { formsApi } from "@/lib/formsApi";
 import { useMutation, useQuery } from "convex/react";
 import { ArrowRight, Check, Grid2x2, LifeBuoy, MessageSquare, PenLine, Phone, RefreshCw, Smartphone, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -296,7 +297,7 @@ export function HomePage() {
       }
     : undefined;
   const quota = useApiData("cma:quota", () => cmaApi.quota(), { pollMs: 120_000 }).data; // new backend
-  const counts = useQuery(api.forms.counts);
+  const counts = useApiData("forms:counts", formsApi.counts, { pollMs: 30_000 }).data;
   const requests = useApiData("cma:list", () => cmaApi.list(), { pollMs: 120_000 }).data; // new backend
   const help = useApiData("help:list", () => helpApi.list(), { pollMs: 60_000 }).data; // new backend
   const decide = ({ id, approve }: { id: string; approve: boolean }) => cmaApi.decideApproval(id, approve);
@@ -353,7 +354,7 @@ export function HomePage() {
       title: `${l.contactName}`,
       sub: `Sent ${l.formTitle} · ${ago(l._creationTime)}`,
       to: `/inbox?open=${l._id}`,
-      phone: l.contactPhone,
+      phone: l.contactPhone ?? undefined,
       hot: true,
     })),
     ...helpToMe.slice(0, 3).map(r => ({

@@ -138,7 +138,7 @@ export const SITUATIONS: Situation[] = [
     steps: [
       { text: "Tick off launch steps as they happen. The seller sees them right away.", to: "/listings", label: "Listings" },
       { text: "Showing feedback lands on the listing's Activity tab. Approve it before the seller sees it.", to: "/listings", label: "Listings" },
-      { text: "Open house: show the Open House Sign-in QR at the door. Visitors go straight into Lofty.", to: "/forms?open=open-house-signin", label: "Open house sign-in" },
+      { text: "Open house: show the Open House Sign-in QR at the door. Sign-ins go to the Hub inbox and update the seller portal count.", to: "/forms?open=open-house-signin", label: "Open house sign-in" },
       { text: "Mondays: fill in the 30-second numbers form (Zillow and MLS counts).", to: "/listings", label: "Listings" },
     ],
     playbook: "open-house",

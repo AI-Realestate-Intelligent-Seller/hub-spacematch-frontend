@@ -44,6 +44,7 @@ import { ResourcesPage } from "@/pages/ResourcesPage";
 import { ListingsPage } from "@/pages/ListingsPage";
 import { ListingDetailPage } from "@/pages/ListingDetailPage";
 import { ListingPlanPage } from "@/pages/ListingPlanPage";
+import { CmaBuilderPage } from "@/pages/CmaBuilderPage";
 import { AdOrdersPage } from "@/pages/AdOrdersPage";
 import { AdoptionPage } from "@/pages/AdoptionPage";
 import { AgentLoginsPage } from "@/pages/AgentLoginsPage";
@@ -123,6 +124,7 @@ export function AuthenticatedRoutes() {
           <Route path="/listings" element={<ListingsPage />} />
           <Route path="/listings/:id" element={<ListingDetailPage />} />
           <Route path="/listings/:id/plan" element={<ListingPlanPage />} />
+          <Route path="/listings/:id/cma" element={<CmaBuilderPage />} />
           <Route path="/ad-orders" element={<AdOrdersPage />} />
           <Route path="/adoption" element={<AdoptionPage />} />
           <Route path="/logins" element={<AgentLoginsPage />} />

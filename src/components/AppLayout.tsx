@@ -1,3 +1,4 @@
+import { formsApi } from "@/lib/formsApi";
 import { hasConvexDeployment } from "@/auth/convexClient";
 import { useCurrentUser, useSession } from "@/auth/session";
 import { useMutation, useQuery } from "convex/react";
@@ -39,7 +40,7 @@ import {
 const NAV = AREAS;
 
 function useInboxBadge() {
-  const c = useQuery(api.forms.counts);
+  const c = useApiData("forms:counts", formsApi.counts, { pollMs: 30_000 }).data;
   return c?.newCount ?? 0;
 }
 

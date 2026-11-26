@@ -1,28 +1,29 @@
 import { OFFICE_ADDRESS } from "../../convex/officeDefs";
-import { useMutation } from "convex/react";
 import { CheckCircle2, Loader2, Star } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useSearchParams } from "react-router";
 import { AGENTS, agentBySlug } from "@/lib/agents";
 import { type Field, formById } from "../../convex/formDefs";
-import { api } from "../../convex/_generated/api";
+import { apiErrorMessage, useApiData } from "@/lib/apiData";
+import { formsApi } from "@/lib/formsApi";
 
 const inputCls = "w-full rounded-xl border border-stone-200 bg-white px-3.5 py-3 text-[16px] outline-none focus:border-[#9C7434] focus:ring-2 focus:ring-[#9C7434]/20";
 
 function FieldInput({ f, value, onChange }: { f: Field; value: string; onChange: (v: string) => void }) {
+  const id = `form-field-${f.id}`;
   switch (f.type) {
     case "textarea":
-      return <textarea className={`${inputCls} min-h-[96px]`} value={value} placeholder={f.placeholder} onChange={e => onChange(e.target.value)} />;
+      return <textarea id={id} className={`${inputCls} min-h-[96px]`} value={value} placeholder={f.placeholder} onChange={e => onChange(e.target.value)} />;
     case "select":
       return (
-        <select className={inputCls} value={value} onChange={e => onChange(e.target.value)}>
+        <select id={id} className={inputCls} value={value} onChange={e => onChange(e.target.value)}>
           <option value="">Select…</option>
           {f.options?.map(o => <option key={o}>{o}</option>)}
         </select>
       );
     case "agent":
       return (
-        <select className={inputCls} value={value} onChange={e => onChange(e.target.value)}>
+        <select id={id} className={inputCls} value={value} onChange={e => onChange(e.target.value)}>
           <option value="">Select…</option>
           {AGENTS.map(a => <option key={a.name}>{a.name}</option>)}
         </select>
@@ -63,12 +64,13 @@ function FieldInput({ f, value, onChange }: { f: Field; value: string; onChange:
       return (
         <div className="relative">
           <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-stone-400">$</span>
-          <input inputMode="numeric" className={`${inputCls} pl-7`} value={value} onChange={e => onChange(e.target.value.replace(/[^\d.,]/g, ""))} />
+          <input id={id} inputMode="numeric" className={`${inputCls} pl-7`} value={value} onChange={e => onChange(e.target.value.replace(/[^\d.,]/g, ""))} />
         </div>
       );
     default:
       return (
         <input
+          id={id}
           className={inputCls}
           type={f.type === "number" ? "text" : f.type}
           inputMode={f.type === "number" ? "decimal" : f.type === "tel" ? "tel" : undefined}
@@ -86,7 +88,15 @@ export function PublicFormPage() {
   const [params] = useSearchParams();
   const def = formById(formId);
   const agent = agentBySlug(params.get("a"));
-  const submit = useMutation(api.forms.submit);
+  const link = params.get("link");
+  const { data: context, error: contextError } = useApiData(link && def ? `public-form:${link}` : null, () => formsApi.context(formId, link!));
+  const [submissionId] = useState(() => {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 15) | 64;
+    bytes[8] = (bytes[8] & 63) | 128;
+    const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  });
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [hp, setHp] = useState("");
   const [busy, setBusy] = useState(false);
@@ -115,25 +125,24 @@ export function PublicFormPage() {
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErr("");
-    const missing = def.fields.find(f => f.required && !(answers[f.id] ?? "").trim());
+    const missing = def.fields.find(f => f.required && !((f.id === "propertyAddress" ? context?.address : null) ?? answers[f.id] ?? "").trim());
     if (missing) return setErr(`Please fill in “${missing.label}”`);
     if (def.audience === "client" && !answers.email?.trim() && !answers.phone?.trim()) {
       return setErr("Please add an email or a phone number so we can reach you");
     }
     setBusy(true);
     try {
-      await submit({ formId: def.id, agent: params.get("a") ?? undefined, answers, website: hp || undefined });
+      await formsApi.submit(def.id, { submissionId, link: link ?? undefined, agent: params.get("a") ?? undefined, answers, website: hp || undefined });
       setDone(true);
       window.scrollTo({ top: 0 });
     } catch (x) {
-      const m = String((x as Error).message ?? x);
-      setErr(m.match(/Uncaught Error: ([^\n]+)/)?.[1] ?? "Something went wrong — please try again.");
+      setErr(apiErrorMessage(x));
     } finally {
       setBusy(false);
     }
   };
 
-  const contactCard = agent ? (
+  const contactCard = context?.agentName ? <p className="mt-4 text-sm text-[#ddd6ca]">{context.agentName}</p> : agent ? (
     <div className="flex items-center gap-3 rounded-2xl bg-white/10 p-3 mt-5 ring-1 ring-white/15">
       <span className="flex size-11 items-center justify-center rounded-full bg-[#9C7434] font-semibold">{agent.name.split(" ").map(s => s[0]).slice(0, 2).join("")}</span>
       <div className="text-sm">
@@ -155,13 +164,13 @@ export function PublicFormPage() {
       </header>
 
       <main className="mx-auto max-w-2xl px-5 py-6">
-        {done ? (
+        {contextError ? <p role="alert" className="rounded-xl bg-red-50 p-4 text-red-800">{apiErrorMessage(contextError)}</p> : link && !context ? <p role="status">Loading form…</p> : done ? (
           <div className="rounded-2xl bg-white p-8 text-center ring-1 ring-[#ebe5da]">
             <CheckCircle2 className="mx-auto size-14 text-[#9C7434]" />
             <h2 className="font-['Playfair_Display'] text-2xl font-semibold mt-3">Thank you!</h2>
             <p className="text-stone-600 mt-2">
               {def.audience === "client"
-                ? `${agent ? agent.name.split(" ")[0] : "Your SpaceMatch agent"} has your answers and will be in touch shortly.`
+                ? `${(context?.agentName ?? agent?.name)?.split(" ")[0] ?? "Your SpaceMatch agent"} has your answers and will be in touch shortly.`
                 : "Sent to the team. You'll hear back soon."}
             </p>
           </div>
@@ -173,10 +182,12 @@ export function PublicFormPage() {
                 <div className="grid sm:grid-cols-2 gap-x-4 gap-y-4">
                   {s.fields.map(f => (
                     <div key={f.id} className={f.half ? "" : "sm:col-span-2"}>
-                      <label className="block text-[15px] font-medium text-[#0A0A0A] mb-1.5">
+                      <label htmlFor={`form-field-${f.id}`} className="block text-[15px] font-medium text-[#0A0A0A] mb-1.5">
                         {f.label}{f.required && <span className="text-[#9C7434]"> *</span>}
                       </label>
-                      <FieldInput f={f} value={answers[f.id] ?? ""} onChange={v => setAnswers(a => ({ ...a, [f.id]: v }))} />
+                      {f.id === "propertyAddress" && context?.address
+                        ? <input id={`form-field-${f.id}`} className={inputCls} value={context.address} readOnly />
+                        : <FieldInput f={f} value={answers[f.id] ?? ""} onChange={v => setAnswers(a => ({ ...a, [f.id]: v }))} />}
                       {f.help && <p className="text-xs text-stone-500 mt-1">{f.help}</p>}
                     </div>
                   ))}

@@ -1,61 +1,89 @@
 import { useCurrentUser } from "@/auth/session";
 import { Check, Copy, Download, ExternalLink, Mail, MessageSquare, QrCode, Send } from "lucide-react";
 import QRCode from "qrcode";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router";
 import { toast } from "sonner";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { AGENTS, agentByEmail, agentSlug } from "@/lib/agents";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { apiErrorMessage, useApiData } from "@/lib/apiData";
+import { formsApi } from "@/lib/formsApi";
+import { listingsApi } from "@/lib/listingsApi";
 import { FORMS, type FormDef, GROUPS } from "../../convex/formDefs";
 
-function ShareDialog({ form, onClose }: { form: FormDef; onClose: () => void }) {
-  const user = useCurrentUser(); // new backend session
-  const me = agentByEmail(user?.email);
-  const [agentName, setAgentName] = useState<string>("");
-  const [prop, setProp] = useState("");
+function ShareDialog({ form, initialListing, onClose }: { form: FormDef; initialListing?: string; onClose: () => void }) {
+  const user = useCurrentUser();
+  const isClient = form.audience === "client";
+  const isOpenHouse = form.id === "open-house-signin";
+  const canLinkListing = isOpenHouse || form.id === "seller-intake" || form.id === "coop-feedback";
+  const { data: listings, error: listingError } = useApiData(canLinkListing ? "forms:listings" : null, listingsApi.pick);
+  const { data: agents } = useApiData(isClient ? "forms:agents" : null, formsApi.agents);
+  const [agentId, setAgentId] = useState(user?._id ?? "");
+  const [listingId, setListingId] = useState(initialListing ?? "");
+  const [url, setUrl] = useState("");
   const [qr, setQr] = useState("");
+  const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
-  useEffect(() => { if (me && !agentName) setAgentName(me.name); }, [me, agentName]);
-
-  const url = useMemo(() => {
-    const u = new URL(`/f/${form.id}`, window.location.origin);
-    if (form.audience === "client" && agentName) u.searchParams.set("a", agentSlug(agentName));
-    if (prop.trim()) u.searchParams.set("p", prop.trim());
-    return u.toString();
-  }, [form, agentName, prop]);
 
   useEffect(() => {
-    QRCode.toDataURL(url, { width: 640, margin: 1, color: { dark: "#0A0A0A", light: "#FFFFFF" } }).then(setQr);
+    if (!url) return;
+    let active = true;
+    void QRCode.toDataURL(url, { width: 640, margin: 1, color: { dark: "#0A0A0A", light: "#FFFFFF" } })
+      .then(image => { if (active) setQr(image); })
+      .catch(() => { if (active) toast.error("Could not create the QR code."); });
+    return () => { active = false; };
   }, [url]);
+
+  function resetLink() {
+    setUrl("");
+    setQr("");
+  }
+
+  const createLink = async () => {
+    setBusy(true);
+    try {
+      const { link } = await formsApi.share(form.id, { listingId: listingId || undefined, agentId: agentId || undefined });
+      const next = new URL(`/f/${form.id}`, window.location.origin);
+      next.searchParams.set("link", link);
+      setUrl(next.toString());
+    } catch (error) {
+      toast.error(apiErrorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const msg = `Hi! Here's a quick form from SpaceMatch — ${form.title}: ${url}`;
   const copy = async () => { await navigator.clipboard.writeText(url); setCopied(true); toast.success("Link copied"); setTimeout(() => setCopied(false), 1500); };
-  const isClient = form.audience === "client";
 
   return (
     <Dialog open onOpenChange={o => !o && onClose()}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle className="font-['Playfair_Display'] text-xl">{form.title}</DialogTitle>
+          <DialogDescription>{form.blurb}</DialogDescription>
         </DialogHeader>
-        <p className="text-sm text-stone-500 -mt-2">{form.blurb}</p>
-        {isClient && (
-          <div className="grid gap-3">
-            <label className="text-sm font-medium">
-              Answers go to
-              <select value={agentName} onChange={e => setAgentName(e.target.value)} className="mt-1 w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5">
-                <option value="">The team inbox (no agent)</option>
-                {AGENTS.map(a => <option key={a.name} value={a.name}>{a.name}</option>)}
-              </select>
-            </label>
-            {(form.id === "open-house-signin" || form.id === "coop-feedback") && (
-              <label className="text-sm font-medium">
-                Property (prefilled on the form)
-                <input value={prop} onChange={e => setProp(e.target.value)} placeholder="e.g. 1824 W Wolfram St" className="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5" />
-              </label>
-            )}
-          </div>
+        {canLinkListing && (
+          <label className="text-sm font-medium">
+            Listing {isOpenHouse ? "(required)" : "(optional)"}
+            <select value={listingId} disabled={busy || !listings} onChange={e => { setListingId(e.target.value); resetLink(); }} className="mt-1 w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5">
+              <option value="">{listings ? "Choose a listing" : "Loading listings…"}</option>
+              {listings?.items.map(l => <option key={l._id} value={l._id}>{l.address}</option>)}
+            </select>
+            {listingError && <span role="alert" className="text-red-800">{apiErrorMessage(listingError)}</span>}
+          </label>
         )}
+        {isClient && !listingId && !isOpenHouse && (
+          <label className="text-sm font-medium">
+            Answers go to
+            <select value={agentId} disabled={busy} onChange={e => { setAgentId(e.target.value); resetLink(); }} className="mt-1 w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5">
+              <option value="">Team inbox</option>
+              {agents?.items.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          </label>
+        )}
+        {listingId && <p className="text-sm text-stone-600">Responses go to the listing agent. {isOpenHouse && "Each submitted sign-in updates the seller portal count."}</p>}
+        {!url && <button type="button" disabled={busy || (isOpenHouse && !listings?.items.some(l => l._id === listingId))} onClick={() => void createLink()} className="rounded-xl bg-[#0A0A0A] px-4 py-3 text-sm font-semibold text-white disabled:opacity-50">{busy ? "Creating link…" : "Create share link"}</button>}
+        {url && <>
         <div className="flex items-center gap-2 rounded-xl bg-[#F7F5F1] p-2 pl-3">
           <span className="truncate text-sm flex-1">{url}</span>
           <button type="button" onClick={copy} className="rounded-lg bg-[#0A0A0A] px-3 py-2 text-xs font-semibold text-white">
@@ -83,11 +111,8 @@ function ShareDialog({ form, onClose }: { form: FormDef; onClose: () => void }) 
             </div>
           </div>
         )}
-        <p className="text-xs text-stone-500">
-          {isClient
-            ? "When your client submits, it lands in your Hub inbox and you get an email (team@ gets a copy)."
-            : "Goes to the team inbox — Michael, Cris and Atom get an email."}
-        </p>
+        </>}
+        <p className="text-xs text-stone-500">Responses appear in the Hub inbox.</p>
       </DialogContent>
     </Dialog>
   );
@@ -104,7 +129,7 @@ export function FormsPage() {
     <div className="space-y-6">
       <div>
         <h1 className="font-['Playfair_Display'] text-3xl font-bold text-[#0A0A0A]">Forms</h1>
-        <p className="text-stone-500 mt-1">25 forms, one for each step. Tap a form to text, email or QR your personal link — answers come back to your inbox.</p>
+        <p className="text-stone-500 mt-1">Share forms by text, email or QR code. Responses come back to your Hub inbox.</p>
       </div>
       <div className="-mx-4 px-4 flex gap-2 overflow-x-auto pb-1">
         {["All", ...GROUPS.map(g => g.id)].map(g => (
@@ -134,7 +159,7 @@ export function FormsPage() {
           </div>
         </section>
       ))}
-      {open && <ShareDialog form={open} onClose={() => setParams({})} />}
+      {open && <ShareDialog key={open.id} form={open} initialListing={params.get("listing") ?? undefined} onClose={() => setParams({})} />}
     </div>
   );
 }

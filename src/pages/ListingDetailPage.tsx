@@ -2,7 +2,7 @@
 import { useAction } from "convex/react";
 import { ArrowLeft, Check, ChevronDown, ClipboardPaste, Clapperboard, Copy, ExternalLink, Eye, EyeOff, FileBarChart, Mail, MailPlus, MessageSquare, RefreshCw, Send, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 import { toast } from "sonner";
 import { LAUNCH_STEPS, LISTING_STATUSES } from "../../convex/launchSteps";
 import { parseShowingTime } from "../../convex/showingtimeParse";
@@ -14,9 +14,12 @@ import { fieldErrors, type Listing, type ListingEvent, type ListingMetric, listi
 import { formatFreeAddress, formatPrice } from "../../convex/address";
 import { AgentAdCampaigns } from "../components/hub/AdCampaigns";
 import { ListingAdOrder } from "../components/hub/AdOrder";
-import { PlanBuilder } from "./ListingPlanPage";
+import { PlanBuilder, PublishedCmaPlanContext } from "./ListingPlanPage";
+import { CmaListingButton } from "@/components/cma/CmaListingButton";
 import { EmptyState, LoadError, Skeleton } from "@/components/hub/FormState";
 import { Skeleton as Placeholder } from "@/components/ui/skeleton";
+import { api as backendApi } from "@/lib/api";
+import { useApiData } from "@/lib/apiData";
 import { useLegacyQuery } from "@/auth/convexClient";
 
 type Tab = "steps" | "numbers" | "next" | "ads" | "activity" | "details";
@@ -26,6 +29,21 @@ const shiftWeek = (w: string, n: number) => new Date(new Date(`${w}T12:00:00Z`).
 
 function SellerLink({ l }: { l: Listing }) {
   const url = `${window.location.origin}/s/${l.token}`;
+  const [params, setParams] = useSearchParams();
+  const { data: google } = useApiData("google-mail:account", () => backendApi<{ configured: boolean; email: string | null }>("/google-mail"));
+  const googleUrl = `/api/v1/google-mail/seller/${encodeURIComponent(l._id)}`;
+  const googleResult = params.get("googleMail");
+  useEffect(() => {
+    if (!googleResult) return;
+    if (googleResult === "cancelled") toast.info("Google account connection cancelled.");
+    else if (googleResult === "missing-seller") toast.info("Google account connected. Add the seller’s email to continue.");
+    else toast.error("Could not connect your Google account. Try again.");
+    setParams(previous => {
+      const next = new URLSearchParams(previous);
+      next.delete("googleMail");
+      return next;
+    }, { replace: true });
+  }, [googleResult, setParams]);
   const first = l.sellerName.split(/\s+/)[0];
   const msg = `Hi ${first}! Here's your private SpaceMatch page for ${l.address.split(",")[0]}. It updates live as we launch and market your home: ${url}`;
   return (
@@ -38,9 +56,18 @@ function SellerLink({ l }: { l: Listing }) {
       <div className="mt-3 grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
         <button onClick={() => navigator.clipboard.writeText(url).then(() => toast.success("Link copied"))} className="flex items-center justify-center gap-1.5 rounded-xl bg-[#9C7434] py-2.5 font-semibold"><Copy className="size-4" /> Copy</button>
         <a href={`sms:${(l.sellerPhone ?? "").replace(/[^\d+]/g, "")}?&body=${encodeURIComponent(msg)}`} className="flex items-center justify-center gap-1.5 rounded-xl bg-white/10 py-2.5"><MessageSquare className="size-4" /> Text seller</a>
-        <a href={`mailto:${l.sellerEmail ?? ""}?subject=${encodeURIComponent(`Your listing page · ${l.address.split(",")[0]}`)}&body=${encodeURIComponent(msg)}`} className="flex items-center justify-center gap-1.5 rounded-xl bg-white/10 py-2.5"><Mail className="size-4" /> Email seller</a>
+        {l.sellerEmail && google?.configured ? (
+          <a href={googleUrl} target="_blank" rel="noreferrer" className="flex items-center justify-center gap-1.5 rounded-xl bg-white/10 py-2.5"><Mail className="size-4" /> Email seller</a>
+        ) : l.sellerEmail ? (
+          <a href={`mailto:${l.sellerEmail ?? ""}?subject=${encodeURIComponent(`Your listing page · ${l.address.split(",")[0]}`)}&body=${encodeURIComponent(msg)}`} className="flex items-center justify-center gap-1.5 rounded-xl bg-white/10 py-2.5"><Mail className="size-4" /> Email seller</a>
+        ) : (
+          <button type="button" disabled title="Add the seller’s email in Details" className="flex items-center justify-center gap-1.5 rounded-xl bg-white/10 py-2.5 opacity-50"><Mail className="size-4" /> Email seller</button>
+        )}
         <a href={url} target="_blank" rel="noreferrer" className="flex items-center justify-center gap-1.5 rounded-xl bg-white/10 py-2.5"><ExternalLink className="size-4" /> Seller view</a>
       </div>
+      {google?.configured && google.email && l.sellerEmail && (
+        <p className="mt-2 text-xs text-white/70">Gmail: {google.email} · <a href={`https://mail.google.com/mail/?authuser=${encodeURIComponent(google.email)}`} target="_blank" rel="noreferrer" className="underline">Open inbox</a> · <button type="button" className="underline" onClick={() => navigator.clipboard.writeText(msg).then(() => toast.success("Message copied")).catch(() => toast.error("Could not copy the message"))}>Copy message</button> · <a href={`${googleUrl}?switch=1`} target="_blank" rel="noreferrer" className="underline">Switch account</a></p>
+      )}
       <button onClick={() => confirm("Make a new link? The old one stops working.") && listingsApi.rotateLink(l._id).then(() => toast.success("New link made")).catch(err => toast.error(errMsg(err)))} className="mt-2 flex items-center gap-1 text-xs text-white/50 hover:text-white"><RefreshCw className="size-3" /> Reset link</button>
     </section>
   );
@@ -60,21 +87,25 @@ function Connected({ l }: { l: Listing }) {
     <section className="rounded-2xl bg-[#F7F5F1] p-4 ring-1 ring-[#D9BC8C]/50" data-testid="listing-connected">
       <div className="text-[11px] uppercase tracking-[0.25em] text-[#9C7434]">Use this listing</div>
       <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
-        {go("/new", <FileBarChart className="size-4 text-[#9C7434]" />, "Request a CMA")}
+        <CmaListingButton listingId={l._id} />
         {go("/reels", <Clapperboard className="size-4 text-[#9C7434]" />, "Order a Reel")}
         {go("/seller-lists", <MailPlus className="size-4 text-[#9C7434]" />, "Mail the neighbors")}
       </div>
+      <p className="mt-2 text-xs text-stone-500">
+        Commercial, lease or investor analysis? <Link to={`/new?listing=${l._id}`} className="font-semibold text-[#9C7434] hover:underline">Use the full request form</Link>
+        <FileBarChart className="ml-1 inline size-3.5 text-[#9C7434]" aria-hidden />
+      </p>
       <div className="mt-3 grid gap-1.5 text-sm sm:grid-cols-2">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1" data-testid="lofty-sync">
           <span className="font-semibold">Lofty:</span>
           {l.loftyLeadId ? (
-            <span className="text-emerald-700"><Check className="mr-0.5 inline size-3.5" />Seller linked, tagged “Hub Listing”</span>
+            <span className="text-emerald-700"><Check className="mr-0.5 inline size-3.5" />Seller found in Lofty (lead #{l.loftyLeadId})</span>
           ) : l.loftyError ? (
-            <><span className="text-red-700">{l.loftyError}</span><button type="button" onClick={() => linkLofty({ id: l._id }).then(() => toast.success("Trying again…")).catch(err => toast.error(errMsg(err)))} className="font-semibold text-[#9C7434]">Try again</button></>
+            <><span className="text-red-700">{l.loftyError}</span><button type="button" onClick={() => linkLofty({ id: l._id }).then(() => toast.success("Looked up in Lofty")).catch(err => toast.error(errMsg(err)))} className="font-semibold text-[#9C7434]">Try again</button></>
           ) : !hasContact ? (
-            <span className="text-stone-500">Add the seller's email or phone (Details) and it links automatically.</span>
+            <span className="text-stone-500">Add the seller's email or phone (Details) to find them in Lofty.</span>
           ) : l.loftyAt === undefined ? (
-            <><span className="text-stone-500">Linking…</span><button type="button" onClick={() => linkLofty({ id: l._id }).then(() => toast.success("Linking…")).catch(err => toast.error(errMsg(err)))} className="font-semibold text-[#9C7434]">Link now</button></>
+            <><span className="text-stone-500">Looking up…</span><button type="button" onClick={() => linkLofty({ id: l._id }).then(() => toast.success("Looked up in Lofty")).catch(err => toast.error(errMsg(err)))} className="font-semibold text-[#9C7434]">Look up now</button></>
           ) : <span className="text-stone-500">Not linked</span>}
         </div>
         <div className="flex flex-wrap items-center gap-x-2" data-testid="zillow-sync">
@@ -606,7 +637,7 @@ function Activity({ l, events, openHouse }: { l: Listing; events: ListingEvent[]
         <h3 className="font-semibold">Open house sign-ins ({openHouse.length})</h3>
         <p className="text-xs text-stone-500">From the Open House QR form with this address. Sellers see the count only.</p>
         {openHouse.length === 0 ? <p className="mt-2 text-sm text-stone-500">No sign-ins yet.</p> : <ul className="mt-2 text-sm">{openHouse.map(o => <li key={o._id} className="flex justify-between border-t border-stone-100 py-1.5"><span>{o.name}</span><span className="text-stone-500">{ago(o.at)}</span></li>)}</ul>}
-        <Link to="/forms" className="mt-2 inline-block text-sm font-semibold text-[#9C7434]">Get the open house QR →</Link>
+        <Link to={`/forms?open=open-house-signin&listing=${encodeURIComponent(l._id)}`} className="mt-2 inline-block text-sm font-semibold text-[#9C7434]">Get the open house QR →</Link>
       </section>
 
       <section className="rounded-2xl bg-white p-4 ring-1 ring-black/5">
@@ -814,7 +845,7 @@ export function ListingDetailPage() {
       </div>
       <SellerLink l={l} />
       <Connected l={l} />
-      {legacyTools && <PlanCard listingId={l._id as Id<"listings">} />}
+      {legacyTools ? <PlanCard listingId={l._id as Id<"listings">} /> : <PublishedCmaPlanContext listingId={l._id} address={l.address} />}
       <div className="flex gap-1 overflow-x-auto rounded-full bg-stone-100 p-1 text-sm [scrollbar-width:none]">
         {TABS.map(([k, label]) => (
           <button key={k} onClick={() => setTab(k)} className={`shrink-0 rounded-full px-4 py-1.5 ${tab === k ? "bg-white font-semibold shadow-sm" : "text-stone-600"}`}>{k === "activity" && pending ? `${label} (${pending})` : label}</button>

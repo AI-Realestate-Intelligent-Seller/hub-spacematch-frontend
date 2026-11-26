@@ -3,6 +3,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { useParams } from "react-router";
 import { LAUNCH_STEPS } from "../../convex/launchSteps";
 import { SellerAdCampaigns } from "../components/hub/AdCampaigns";
+import { SellerMarketSection } from "@/components/cma/SellerMarketSection";
 import { listingsApi, type PortalData as ApiPortalData, useListingsData } from "@/lib/listingsApi";
 
 const ago = (t: number) => {
@@ -123,8 +124,8 @@ function NextSteps({ data, token, demo }: { data: PortalData; token: string; dem
 
 export function SellerPortalPage() {
   const { token = "" } = useParams();
-  // Refreshes every minute so the seller sees new numbers and updates (Convex pushed them live).
-  const res = useListingsData(`portal:${token}`, () => listingsApi.portal(token), { pollMs: 60_000 });
+  // Poll for seller-visible updates such as new open-house sign-ins.
+  const res = useListingsData(`portal:${token}`, () => listingsApi.portal(token), { pollMs: 15_000 });
   // undefined = loading, null = link not found (or expired)
   const data = res.notFound ? null : res.data;
   useEffect(() => {
@@ -253,6 +254,9 @@ export function SellerPortalView({ data, token, demo, top, bottom }: { data: Por
         </section>
 
         <SocialReel data={data} />
+
+        {/* Market & pricing: the agent-published CMA only (hidden on the public demo). */}
+        {!demo && <SellerMarketSection token={token} />}
 
         <NextSteps data={data} token={token} demo={demo} />
 

@@ -1,4 +1,4 @@
-import { useQuery } from "convex/react";
+import { formsApi } from "@/lib/formsApi";
 import {
   ArrowRight,
   BookUser,
@@ -16,7 +16,6 @@ import { useNavigate } from "react-router";
 import { DOCS, TEAM, TOOLS, toolHref } from "@/lib/hub";
 import { PLAYBOOKS } from "@/lib/playbooks";
 import { SCRIPTS, TEMPLATES } from "@/lib/templates";
-import { api } from "../../../convex/_generated/api";
 import { useApiData } from "@/lib/apiData";
 import { rentalsApi } from "@/lib/rentalsApi";
 import { cmaApi } from "@/lib/cmaApi";
@@ -243,7 +242,7 @@ export function GlobalSearch({ big = false }: { big?: boolean }) {
   const vendors = useApiData("vendors:list", () => vendorsApi.list()).data; // new backend
   const rentals = useApiData("rentals:list", () => rentalsApi.list()).data; // new backend
   const requests = useApiData("cma:list", () => cmaApi.list()).data; // new backend
-  const inbox = useQuery(api.forms.inbox, {});
+  const inbox = useApiData("forms:search", () => formsApi.inbox(), { pollMs: 30_000 }).data;
 
   const hits = useMemo<Hit[]>(() => {
     if (q.trim().length < 2) return [];
@@ -397,9 +396,9 @@ export function GlobalSearch({ big = false }: { big?: boolean }) {
       const s = score(
         q,
         r.contactName,
-        r.contactEmail,
-        r.contactPhone,
-        r.propertyAddress,
+        r.contactEmail ?? undefined,
+        r.contactPhone ?? undefined,
+        r.propertyAddress ?? undefined,
         r.formTitle,
       );
       if (s)
