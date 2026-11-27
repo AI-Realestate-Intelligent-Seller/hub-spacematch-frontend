@@ -1,23 +1,23 @@
-// Reel Studio (Michael 2026-10-28): agents order a Viktor-edited Reel from their own clips,
-// pay by Zelle up front, Michael confirms, Viktor edits, agent downloads one file per app.
-import { PayByCard } from "@/components/PayByCard";
-import { useAction, useMutation, useQuery } from "convex/react";
+// Reel Studio (Michael 2026-10-28): agents order a the editor-edited Reel from their own clips,
+// pay by Zelle up front, Michael confirms, our editor prepares, agent downloads one file per app.
 import {
   AlertTriangle, Check, CheckCircle2, ChevronDown, CirclePlus, Clapperboard, ClipboardList, Copy, Download, ExternalLink, Film, Loader2, MessageSquare,
-  ArrowDown, ArrowUp, Captions, Pause, Play, Receipt, RefreshCw, Send, Sparkles, Upload, Wallet, X, XCircle,
+  ArrowDown, ArrowUp, Captions, Receipt, RefreshCw, Send, Sparkles, Upload, Wallet, X, XCircle,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router";
+import { Link, useOutletContext, useSearchParams } from "react-router";
 import { toast } from "sonner";
 import {
-  BROLL_PICKS, CLIP_ROLES, DEFAULT_OPTIONS, EXTRA_REVISION_PRICE, FORMATS, LENGTHS, MUSIC, PACES, PALETTES,
-  CAPTION_SPOTS, MUSIC_TAKES, spotOf, styleOf, PURPOSES, musicUrl, REEL_STAGES, REEL_TIERS, SAMPLE_MATCH, SAMPLE_MAX_MB, STYLES, ctasFor, formatOf, nextQueueCheck, optionRows, tierOf, type Palette, type ReelOptions, type ReelStyle,
-} from "../../convex/reelDefs";
-import { api } from "../../convex/_generated/api";
+  CLIP_ROLES, DEFAULT_OPTIONS, EXTRA_REVISION_PRICE, FORMATS, LENGTHS, PACES, PALETTES,
+  CAPTION_SPOTS, spotOf, styleOf, PURPOSES, REEL_STAGES, REEL_TIERS, SAMPLE_MATCH, SAMPLE_MAX_MB, STYLES, ctasFor, formatOf, optionRows, tierOf, type Palette, type ReelOptions, type ReelStyle,
+} from "@/lib/reelStudioDefinitions";
+import { placeReel, reelAction, uploadReelClip, useReelAssets, type ReelConfigResult, useReelDrive, useReelFree, useReelQueue, useReels } from "@/lib/reelStudioApi";
+import { LoadError } from "@/components/hub/FormState";
+import { apiErrorMessage } from "@/lib/apiData";
 import { ListingPicker, type PickedListing } from "@/components/hub/ListingPicker";
 import { isIOS, useSaveVideo, videoFileName } from "@/lib/saveVideo";
 
-const errMsg = (e: unknown) => /Uncaught Error: ([^\n]+)/.exec(String((e as Error)?.message ?? e))?.[1] ?? "Something went wrong. Try again.";
+const errMsg = apiErrorMessage;
 const money = (n: number) => `$${n.toFixed(n % 1 ? 2 : 0)}`;
 const day = (t?: number) => (t ? new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "");
 const mb = (n: number) => (n > 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(n / 1e6))} MB`);
@@ -80,116 +80,8 @@ function StylePreview({ st, p, spot = "low", captions = true }: { st: ReelStyle;
   );
 }
 
-type TrendSound = { title: string; artist: string; use: string; reels?: string; preview?: string; link?: string };
-
-/** One shared player: tap ▶ on any mood or version to hear it (30 s loop); tapping again or another stops it. */
-function usePreview() {
-  const ref = useRef<HTMLAudioElement | null>(null);
-  const [playing, setPlaying] = useState<string | null>(null);
-  useEffect(() => () => ref.current?.pause(), []);
-  const toggle = (url: string) => {
-    if (!ref.current) {
-      ref.current = new Audio();
-      ref.current.loop = true;
-      ref.current.onended = () => setPlaying(null);
-    }
-    const a = ref.current;
-    if (playing === url) { a.pause(); setPlaying(null); return; }
-    a.src = url;
-    a.loop = !url.startsWith("http"); // our loops repeat; song previews play once
-    a.currentTime = 0;
-    a.play().then(() => setPlaying(url)).catch(() => toast.error("Couldn't play the sample. Check your phone isn't on silent."));
-  };
-  return { playing, toggle };
-}
-
-function PlayBtn({ url, label, pv }: { url: string; label: string; pv: ReturnType<typeof usePreview> }) {
-  const on = pv.playing === url;
-  return (
-    <button type="button" onClick={() => pv.toggle(url)} aria-label={`${on ? "Stop" : "Play"} ${label}`} className={`flex size-9 shrink-0 items-center justify-center rounded-full ${on ? "bg-[#9C7434] text-white" : "bg-white text-[#0A0A0A] ring-1 ring-black/10"}`}>
-      {on ? <Pause className="size-4" /> : <Play className="ml-0.5 size-4" />}
-    </button>
-  );
-}
-
-/** Music (Michael 11-08): hear every mood, pick one of two versions, or use this week's trending song. */
-function MusicPicker({ o, setO, sounds }: { o: ReelOptions; setO: React.Dispatch<React.SetStateAction<ReelOptions>>; sounds: TrendSound[] }) {
-  const pv = usePreview();
-  const moods = MUSIC.filter(m => MUSIC_TAKES[m.key]);
-  const take = o.musicTake ?? "a";
-  const pickMood = (k: string) => setO(p => ({ ...p, music: k, musicTake: p.music === k ? p.musicTake : "a", trendSound: undefined }));
-  return (
-    <div className="space-y-3" data-testid="music-picker">
-      <div className="flex items-baseline justify-between gap-2">
-        <span className="text-sm font-semibold text-stone-700">Music</span>
-        <span className="text-sm text-stone-500">Tap ▶ to listen</span>
-      </div>
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3" role="group" aria-label="Music">
-        {moods.map(m => {
-          const on = o.music === m.key;
-          return (
-            <div key={m.key} className={`flex items-center gap-2 rounded-xl p-1.5 pr-2 ring-2 transition ${on ? "bg-[#0A0A0A] ring-[#0A0A0A]" : "bg-[#F7F5F1] ring-transparent"}`}>
-              <PlayBtn url={musicUrl(m.key, on ? take : "a")} label={m.label} pv={pv} />
-              <button type="button" aria-pressed={on} onClick={() => pickMood(m.key)} className={`min-w-0 flex-1 truncate py-1.5 text-left text-[15px] font-semibold ${on ? "text-white" : "text-stone-800"}`}>{m.label}</button>
-            </div>
-          );
-        })}
-      </div>
-      {MUSIC_TAKES[o.music] && (
-        <div className="rounded-xl bg-[#F7F5F1] p-2.5" data-testid="music-takes">
-          <div className="mb-2 text-sm font-semibold text-stone-700">Pick a version of {MUSIC.find(m => m.key === o.music)?.label}</div>
-          <div className="grid gap-2 sm:grid-cols-2" role="group" aria-label="Music version">
-            {(["a", "b"] as const).map(t => {
-              const on = take === t;
-              return (
-                <div key={t} className={`flex items-center gap-2 rounded-xl bg-white p-1.5 pr-2 ring-2 ${on ? "ring-[#9C7434]" : "ring-black/5"}`}>
-                  <PlayBtn url={musicUrl(o.music, t)} label={`version ${t.toUpperCase()}`} pv={pv} />
-                  <button type="button" aria-pressed={on} onClick={() => setO(p => ({ ...p, musicTake: t }))} className="min-w-0 flex-1 py-1 text-left">
-                    <span className="block text-[15px] font-semibold">Version {t.toUpperCase()}{on && <Check className="ml-1 inline size-4 text-[#9C7434]" />}</span>
-                    <span className="block truncate text-sm text-stone-500">{MUSIC_TAKES[o.music][t]}</span>
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-          <p className="mt-2 text-sm text-stone-500">Royalty-free and made for SpaceMatch, so it's safe on every app and in ads. It plays softly under your voice.</p>
-        </div>
-      )}
-      {sounds.length > 0 && (
-        <div className="rounded-xl border border-[#E8DCC4] p-2.5" data-testid="trend-sounds">
-          <div className="flex items-center gap-1.5 text-sm font-semibold text-stone-800"><Sparkles className="size-4 text-[#9C7434]" /> Trending songs this week</div>
-          <p className="mt-0.5 text-sm text-stone-500">Instagram and TikTok don't let us put these songs in your file. Tap ▶ for a 30-second preview. Pick one, we cut your Reel to fit it, and you add the song in the app when you post.</p>
-          <ul className="mt-2 space-y-1.5">
-            {sounds.map(sd => {
-              const key = `${sd.title} — ${sd.artist}`;
-              const on = o.music === "none_trending" && o.trendSound === key;
-              return (
-                <li key={key} className={`flex items-start gap-2 rounded-xl p-2 ring-2 ${on ? "bg-[#F7F5F1] ring-[#9C7434]" : "ring-black/5"}`}>
-                  {sd.preview
-                    ? <PlayBtn url={sd.preview} label={sd.title} pv={pv} />
-                    : <a href={`https://www.youtube.com/results?search_query=${encodeURIComponent(`${sd.title} ${sd.artist}`)}`} target="_blank" rel="noreferrer" aria-label={`Listen to ${sd.title}`} className="flex size-9 shrink-0 items-center justify-center rounded-full bg-white ring-1 ring-black/10"><Play className="ml-0.5 size-4" /></a>}
-                  <div className="min-w-0 flex-1">
-                    <div className="text-[15px] font-semibold">{sd.title} <span className="font-normal text-stone-500">· {sd.artist}{sd.reels ? ` · ${sd.reels} Reels` : ""}</span></div>
-                    <div className="text-sm text-stone-600">{sd.use}</div>
-                    {sd.link && <a href={sd.link} target="_blank" rel="noreferrer" className="mt-0.5 inline-block text-sm font-semibold text-[#9C7434] underline-offset-2 hover:underline">Full song ↗</a>}
-                  </div>
-                  <button type="button" aria-pressed={on} onClick={() => setO(p => ({ ...p, music: "none_trending", trendSound: on ? undefined : key }))} className={`shrink-0 rounded-lg px-3 py-1.5 text-sm font-semibold ${on ? "bg-[#9C7434] text-white" : "bg-[#0A0A0A] text-white"}`}>{on ? "Picked" : "Use"}</button>
-                </li>
-              );
-            })}
-          </ul>
-          <p className="mt-2 text-sm text-stone-500">On a business account some big-label songs are blocked. Search the song in Instagram first. If it's not there, pick one of our versions above.</p>
-        </div>
-      )}
-      <Chips label="Other music choices" options={MUSIC.filter(m => !MUSIC_TAKES[m.key])} value={o.music} onChange={k => setO(p => ({ ...p, music: k, trendSound: k === "none_trending" ? p.trendSound : undefined }))} />
-    </div>
-  );
-}
-
 type Need = "done" | "needed" | "optional";
 
-/** Numbered step card. Michael 11-08: "I never know what is not finished" → every step shows
- *  a gold check when it's set, a red "Needed" flag (with what's missing) when it isn't. */
 function Section({ n, title, sub, children, id, need, missing, flash }: {
   n: number; title: string; sub?: string; children: React.ReactNode; id?: string; need?: Need; missing?: string; flash?: boolean;
 }) {
@@ -258,62 +150,42 @@ function Toggle({ on, set, label }: { on: boolean; set: (v: boolean) => void; la
   );
 }
 
-/** "Copy a sample video": paste a link or upload a Reel they like; Viktor matches its style (not its content). */
-function SamplePicker({ sample, onChange }: { sample: ReelOptions["sample"]; onChange: (s: ReelOptions["sample"]) => void }) {
-  const getUrl = useMutation(api.reelOrders.sampleUploadUrl);
-  const [mode, setMode] = useState<"link" | "upload">(sample?.storageId ? "upload" : "link");
+/** Reference footage guides cuts and story structure. */
+function SamplePicker({ sample, onChange, as }: { as?: string; sample: ReelOptions["sample"]; onChange: (s: ReelOptions["sample"]) => void }) {
   const [uploading, setUploading] = useState(false);
   const on = !!sample;
-  const s = sample ?? { match: SAMPLE_MATCH.filter(m => m.key !== "colors").map(m => m.key) };
+  const s = sample ?? { match: SAMPLE_MATCH.filter(m => m.key === "edit" || m.key === "story").map(m => m.key) };
   const upload = async (f?: File) => {
     if (!f) return;
     if (!/^video\//.test(f.type) && !/\.(mov|mp4|m4v|webm)$/i.test(f.name)) return toast.error("Pick a video file");
     if (f.size > SAMPLE_MAX_MB * 1e6) return toast.error(`Keep the sample under ${SAMPLE_MAX_MB} MB, or paste a link instead.`);
     setUploading(true);
     try {
-      const url = await getUrl();
-      const r = await fetch(url, { method: "POST", headers: { "Content-Type": f.type || "video/mp4" }, body: f });
-      if (!r.ok) throw new Error("upload");
-      const { storageId } = (await r.json()) as { storageId: string };
+      const { id: storageId } = await uploadReelClip(f, as);
       onChange({ ...s, link: undefined, storageId, fileName: f.name, size: f.size });
       toast.success("Sample uploaded");
     } catch {
-      toast.error("Upload failed. Try again or paste a link.");
+      toast.error("Upload failed. Try again.");
     } finally {
       setUploading(false);
     }
   };
   return (
     <div className="rounded-xl bg-[#F7F5F1] p-3 ring-1 ring-black/10" data-testid="sample-picker">
-      <Toggle on={on} set={b => onChange(b ? { ...s } : undefined)} label="Copy the style of a sample video" />
-      {!on && <p className="mt-1.5 text-sm text-stone-500">Seen a Reel you love? Add it and Viktor edits yours the same way.</p>}
+      <Toggle on={on} set={b => onChange(b ? { ...s } : undefined)} label="Use a video as an editing reference" />
+      {!on && <p className="mt-1.5 text-sm text-stone-500">Seen a Reel you love? Add it and our editor prepares yours the same way.</p>}
       {on && (
         <div className="mt-3 space-y-3">
-          <span className="inline-flex rounded-full bg-white p-0.5 text-sm ring-1 ring-black/10">
-            <button type="button" onClick={() => setMode("link")} className={`rounded-full px-3 py-1 ${mode === "link" ? "bg-[#0A0A0A] font-semibold text-white" : "text-stone-600"}`}>Paste a link</button>
-            <button type="button" onClick={() => setMode("upload")} className={`rounded-full px-3 py-1 ${mode === "upload" ? "bg-[#0A0A0A] font-semibold text-white" : "text-stone-600"}`}>Upload a video</button>
-          </span>
-          {mode === "link" ? (
-            <input
-              value={s.link ?? ""}
-              onChange={e => onChange({ ...s, link: e.target.value, storageId: undefined, fileName: undefined, size: undefined })}
-              maxLength={500}
-              placeholder="Instagram, TikTok, YouTube or Facebook link"
-              className="w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5 text-[15px]"
-              aria-label="Sample video link"
-            />
-          ) : (
             <label className="flex cursor-pointer items-center gap-2.5 rounded-xl bg-white px-3 py-2.5 text-[15px] ring-1 ring-black/10">
               {uploading ? <Loader2 className="size-4 animate-spin text-[#9C7434]" /> : <Upload className="size-4 text-[#9C7434]" />}
               <span className="min-w-0 flex-1 truncate">{uploading ? "Uploading…" : s.fileName ? `${s.fileName} · ${mb(s.size ?? 0)}` : `Choose a video (screen recording is fine, up to ${SAMPLE_MAX_MB} MB)`}</span>
               <input type="file" accept="video/*" className="sr-only" disabled={uploading} onChange={e => upload(e.target.files?.[0])} aria-label="Upload sample video" />
             </label>
-          )}
           <div>
             <div className="mb-1.5 text-sm font-semibold text-stone-700">What should match?</div>
-            <Chips label="What to match" multi options={SAMPLE_MATCH} value={s.match} onChange={k => onChange({ ...s, match: s.match.includes(k) ? s.match.filter(x => x !== k) : [...s.match, k] })} />
+            <Chips label="What to match" multi options={SAMPLE_MATCH.filter(m => m.key === "edit" || m.key === "story")} value={s.match} onChange={k => onChange({ ...s, match: s.match.includes(k) ? s.match.filter(x => x !== k) : [...s.match, k] })} />
           </div>
-          <p className="text-sm text-stone-500">Viktor copies the look and feel, not the video: your clips, your words, your branding. Anything you don't tick comes from your picks below.</p>
+          <p className="text-sm text-stone-500">The reference helps guide the edit. The reel uses your footage and branding.</p>
         </div>
       )}
     </div>
@@ -338,33 +210,13 @@ function CopyRow({ label, value }: { label: string; value: string }) {
 
 // ---------- direct phone upload (Michael 11-08: "the uploading is really confusing") ----------
 // Each clip goes up in 16 MB parts, 3 at a time, each part retried, so big 4K files from a phone
-// don't hit the 2-minute single-upload limit. Viktor joins the parts and files the clip in Drive.
-const PART = 16 * 1024 * 1024;
-const MAX_UPLOAD = 5 * 1024 * 1024 * 1024;
+// keep each storage upload small and retry individual parts.
+const MAX_UPLOAD = 5 * 1024 ** 3;
 type UpJob = { key: string; name: string; size: number; done: number; state: "uploading" | "done" | "error"; err?: string; clipId?: string; lowQ?: boolean };
 
-function putPart(url: string, body: Blob, onProgress: (n: number) => void): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const x = new XMLHttpRequest();
-    x.open("POST", url);
-    x.setRequestHeader("Content-Type", "application/octet-stream");
-    x.upload.onprogress = e => onProgress(e.loaded);
-    x.onload = () => {
-      if (x.status >= 200 && x.status < 300) {
-        try { resolve(JSON.parse(x.responseText).storageId); } catch { reject(new Error("bad response")); }
-      } else reject(new Error(`HTTP ${x.status}`));
-    };
-    x.onerror = () => reject(new Error("network"));
-    x.ontimeout = () => reject(new Error("timeout"));
-    x.timeout = 115_000;
-    x.send(body);
-  });
-}
-
 function useClipUpload(as: string | undefined, onUploaded: (c: Clip) => void) {
-  const getUrls = useMutation(api.reelOrders.clipPartUrls);
-  const save = useMutation(api.reelOrders.saveClipUpload);
   const [jobs, setJobs] = useState<UpJob[]>([]);
+  const retryFiles = useRef(new Map<string, File>());
   const patch = (key: string, p: Partial<UpJob>) => setJobs(js => js.map(j => (j.key === key ? { ...j, ...p } : j)));
   const busy = jobs.some(j => j.state === "uploading");
 
@@ -380,40 +232,16 @@ function useClipUpload(as: string | undefined, onUploaded: (c: Clip) => void) {
   }, [busy]);
 
   const uploadOne = async (file: File, key: string) => {
-    const n = Math.max(1, Math.ceil(file.size / PART));
-    const ids: string[] = new Array(n);
-    const loaded: number[] = new Array(n).fill(0);
-    const pool: string[] = [];
-    const url = async () => {
-      if (!pool.length) pool.push(...(await getUrls({ count: Math.min(8, n) })));
-      return pool.pop()!;
-    };
-    let next = 0;
-    const worker = async () => {
-      while (next < n) {
-        const i = next++;
-        const blob = file.slice(i * PART, Math.min(file.size, (i + 1) * PART));
-        for (let attempt = 1; ; attempt++) {
-          try {
-            ids[i] = await putPart(await url(), blob, b => {
-              loaded[i] = b;
-              patch(key, { done: loaded.reduce((s, x) => s + x, 0) });
-            });
-            break;
-          } catch (e) {
-            loaded[i] = 0;
-            if (attempt >= 4) throw e;
-            await new Promise(r => setTimeout(r, 1500 * attempt));
-          }
-        }
-      }
-    };
-    await Promise.all([worker(), worker(), worker()]);
-    const clipId = await save({ name: file.name, size: file.size, mimeType: file.type || "video/mp4", parts: ids, as });
-    patch(key, { state: "done", done: file.size, clipId });
-    onUploaded({ id: clipId, name: file.name, size: file.size, link: "hub" });
+    const clip = await uploadReelClip(file, as, done => patch(key, { done }));
+    retryFiles.current.delete(key);
+    patch(key, { state: "done", done: file.size, clipId: clip.id });
+    onUploaded(clip);
   };
 
+  const start = (file: File, key: string) => {
+    patch(key, { state: "uploading", done: 0, err: undefined });
+    void uploadOne(file, key).catch(error => patch(key, { state: "error", err: errMsg(error) }));
+  };
   const add = (files: FileList | null) => {
     const list = Array.from(files ?? []);
     for (const f of list) {
@@ -425,13 +253,21 @@ function useClipUpload(as: string | undefined, onUploaded: (c: Clip) => void) {
       // WhatsApp/Messages copies are squashed; a few MB for a real clip usually means a copy.
       const lowQ = /whatsapp|^IMG-\d{8}-WA/i.test(f.name) || f.size < 4_000_000;
       setJobs(js => [...js, { key, name: f.name, size: f.size, done: 0, state: "uploading", lowQ }]);
-      uploadOne(f, key).catch(() => patch(key, { state: "error", err: "Upload stopped (weak signal?). Tap Retry." }));
+      retryFiles.current.set(key, f);
+      start(f, key);
     }
   };
-  const retry = (key: string) => setJobs(js => js.filter(j => j.key !== key));
+  const retry = (key: string) => {
+    const file = retryFiles.current.get(key);
+    if (file) start(file, key);
+  };
+  const clear = (key: string) => {
+    retryFiles.current.delete(key);
+    setJobs(js => js.filter(j => j.key !== key));
+  };
   const total = jobs.filter(j => j.state === "uploading").reduce((s, j) => s + j.size, 0);
   const done = jobs.filter(j => j.state === "uploading").reduce((s, j) => s + j.done, 0);
-  return { jobs, add, retry, busy, pct: total ? Math.min(99, Math.round((done / total) * 100)) : 100, left: jobs.filter(j => j.state === "uploading").length };
+  return { jobs, add, retry, clear, canRetry: (key: string) => retryFiles.current.has(key), busy, pct: total ? Math.min(99, Math.round((done / total) * 100)) : 100, left: jobs.filter(j => j.state === "uploading").length };
 }
 
 function UploadBox({ up, picked }: { up: ReturnType<typeof useClipUpload>; picked: Clip[] }) {
@@ -458,12 +294,13 @@ function UploadBox({ up, picked }: { up: ReturnType<typeof useClipUpload>; picke
                   <span className="shrink-0 text-sm text-stone-500">
                     {j.state === "uploading" ? `${pct}% of ${mb(j.size)}` : j.state === "done" ? (inReel ? "Done · in your Reel" : "Done") : ""}
                   </span>
-                  {j.state === "error" && <button type="button" onClick={() => up.retry(j.key)} className="shrink-0 text-sm font-semibold text-[#9C7434] underline">Clear</button>}
+                  {j.state === "error" && up.canRetry(j.key) && <button type="button" onClick={() => up.retry(j.key)} className="shrink-0 text-sm font-semibold text-[#9C7434] underline">Retry</button>}
+                  {j.state === "error" && <button type="button" onClick={() => up.clear(j.key)} className="shrink-0 text-sm text-stone-600 underline">Clear</button>}
                 </div>
                 {j.state === "uploading" && (
                   <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-stone-200"><div className="h-full rounded-full bg-[#9C7434] transition-[width]" style={{ width: `${Math.max(3, pct)}%` }} /></div>
                 )}
-                {j.state === "error" && <p className="mt-1 text-sm text-[#C2410C]">{j.err} Pick the video again to retry.</p>}
+                {j.state === "error" && <p className="mt-1 text-sm text-[#C2410C]">{j.err}</p>}
                 {j.lowQ && j.state !== "error" && <p className="mt-1 text-sm text-amber-700">This looks like a compressed copy. For the sharpest Reel, use the original from your camera roll.</p>}
               </li>
             );
@@ -475,21 +312,20 @@ function UploadBox({ up, picked }: { up: ReturnType<typeof useClipUpload>; picke
   );
 }
 
-function NewReel({ as, onPlaced }: { as?: string; onPlaced: () => void }) {
-  const vids = useQuery(api.agentVideos.mine, { as });
-  const refresh = useAction(api.agentVideos.refresh);
-  const place = useMutation(api.reelOrders.place);
-  const freeInfo = useQuery(api.reelOrders.freeReels, { as });
+function NewReel({ as, testPayment, onPlaced }: { as?: string; testPayment: boolean; onPlaced: () => void }) {
+  const { data: vids, reload: refresh, error: driveError } = useReelDrive(as);
+  const freeInfo = useReelFree(as);
   const freeLeft = freeInfo?.left ?? 0;
-  const isFree = freeLeft > 0;
+  const isFree = !testPayment && freeLeft > 0;
   const [tierKey, setTierKey] = useState<"quick" | "signature">("signature");
-  const [o, setO] = useState<ReelOptions>(DEFAULT_OPTIONS);
+  const [o, setO] = useState<ReelOptions>({ ...DEFAULT_OPTIONS, music: "none", broll: ["none"] });
   const [picked, setPicked] = useState<Clip[]>([]);
   const [notes, setNotes] = useState("");
   const [busy, setBusy] = useState(false);
+  const orderKey = useRef<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const tier = tierOf(tierKey);
-  const hubUps = useQuery(api.reelOrders.myClipUploads, { as });
+  const hubUps = useReelAssets(as);
   const maxRef = useRef(tier.maxClips);
   maxRef.current = tier.maxClips;
   // A finished phone upload goes straight into the Reel (in the order it finished).
@@ -505,14 +341,7 @@ function NewReel({ as, onPlaced }: { as?: string; onPlaced: () => void }) {
   );
   const [flash, setFlash] = useState<string | null>(null);
   const set = <K extends keyof ReelOptions>(k: K, val: ReelOptions[K]) => setO(p => ({ ...p, [k]: val }));
-  const toggleIn = (k: "broll" | "formats", key: string) =>
-    setO(p => {
-      const cur = p[k];
-      if (k === "broll" && (key === "auto" || key === "none")) return { ...p, broll: [key] };
-      const base = k === "broll" ? cur.filter(x => x !== "auto" && x !== "none") : cur;
-      const next = base.includes(key) ? base.filter(x => x !== key) : [...base, key];
-      return { ...p, [k]: next.length ? next : k === "broll" ? ["auto"] : next };
-    });
+  const toggleFormat = (key: string) => setO(p => ({ ...p, formats: p.formats.includes(key) ? p.formats.filter(format => format !== key) : [...p.formats, key] }));
 
   useEffect(() => {
     if (o.lengthSec > tier.maxSeconds) set("lengthSec", tier.maxSeconds);
@@ -522,15 +351,11 @@ function NewReel({ as, onPlaced }: { as?: string; onPlaced: () => void }) {
 
   const doRefresh = () => {
     setRefreshing(true);
-    refresh({ as }).catch(e => toast.error(errMsg(e))).finally(() => setRefreshing(false));
+    refresh().finally(() => setRefreshing(false));
   };
-  useEffect(() => {
-    if (vids && (!vids.checkedAt || Date.now() - vids.checkedAt > 10 * 60_000)) doRefresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [vids?.email]);
-
   const driveFiles = (vids?.files ?? []).filter(f => /video|quicktime|mp4/i.test(f.mimeType) || /\.(mov|mp4|m4v)$/i.test(f.name));
   const files = [...(hubUps ?? []), ...driveFiles];
+  const driveMessage = driveError ? "Team Drive is unavailable. You can still upload clips directly." : null;
   const pick = (f: Clip) => {
     if (picked.some(p => p.id === f.id)) return setPicked(picked.filter(p => p.id !== f.id));
     if (tier.maxClips === 1) return setPicked([{ ...f, role: "talk" }]);
@@ -557,8 +382,6 @@ function NewReel({ as, onPlaced }: { as?: string; onPlaced: () => void }) {
     toast.success(`Filled in from ${l.address}`);
   };
   const [allStyles, setAllStyles] = useState(false);
-  const trendData = useQuery(api.reelOrders.trends, {});
-  const trendPick = trendData?.picks.find(t => t.purpose === o.purpose) ?? trendData?.picks.find(t => t.purpose === "other");
   const shownStyles = allStyles ? STYLES : STYLES.filter(st => st.for.includes("all") || st.for.includes(o.purpose));
   const palNow: Palette = (() => {
     const p0 = PALETTES.find(p => p.key === o.palette) ?? PALETTES[0];
@@ -571,7 +394,7 @@ function NewReel({ as, onPlaced }: { as?: string; onPlaced: () => void }) {
   }, [o.purpose]);
   const sampleOk = !o.sample || !!o.sample.storageId || /^https?:\/\/\S+$/i.test(o.sample.link?.trim() ?? "");
   const ctaOk = o.cta !== "custom" || !!o.ctaText?.trim();
-  const fmtStep = tier.broll ? 8 : 7;
+  const fmtStep = 7;
   // What's still missing, in page order. Drives the step flags and the bottom bar.
   const missing: { key: string; label: string; section: string }[] = [];
   if (up.busy) missing.push({ key: "uploading", label: `Uploading ${up.left} video${up.left === 1 ? "" : "s"} · ${up.pct}%`, section: "reel-step-clips" });
@@ -595,8 +418,9 @@ function NewReel({ as, onPlaced }: { as?: string; onPlaced: () => void }) {
     }
     setBusy(true);
     try {
-      await place({ tier: tierKey, options: o, clips: picked.map(({ id, name, link, size, role }) => ({ id, name, link, size, role: o.autoOrder ? undefined : role })), notes: notes || undefined, as });
-      toast.success(isFree ? `Free Reel ordered. It's in line for editing.${freeLeft > 1 ? ` ${freeLeft - 1} free left.` : ""}` : "Order placed. Send the Zelle to start.");
+      const { font, weight, upper, caption, motion } = styleOf(o.style)!;
+      await placeReel({ requestId: orderKey.current ??= crypto.randomUUID(), testPayment, tier: tierKey, options: { ...o, renderStyle: { font, weight, upper, caption, motion, bg: palNow.bg, accent: palNow.accent, text: palNow.text } }, clips: picked.map(({ id, name, link, size, role }) => ({ id, name, link, size, role: o.autoOrder ? undefined : role })), notes: notes || undefined, as });
+      toast.success(testPayment ? "Test request added. Mark the test payment as sent." : isFree ? `Free Reel ordered. It's in line for editing.${freeLeft > 1 ? ` ${freeLeft - 1} free left.` : ""}` : "Order placed. Send the Zelle to start.");
       onPlaced();
     } catch (e) {
       toast.error(errMsg(e));
@@ -607,6 +431,11 @@ function NewReel({ as, onPlaced }: { as?: string; onPlaced: () => void }) {
 
   return (
     <div className="space-y-3 pb-40 md:pb-28">
+      {testPayment && (
+        <div className="rounded-xl bg-amber-50 p-3 text-sm text-amber-900" role="status">
+          <strong>Test reel request.</strong> Use the test payment on this order to exercise approval and editing without transferring money.
+        </div>
+      )}
       {isFree && (
         <div className="flex items-center gap-2 rounded-2xl bg-[#0A0A0A] px-4 py-3 text-[15px] text-white" data-testid="first-free">
           <span className="shrink-0 rounded-full bg-[#9C7434] px-2.5 py-0.5 text-sm font-bold">FREE</span>
@@ -615,7 +444,8 @@ function NewReel({ as, onPlaced }: { as?: string; onPlaced: () => void }) {
           </span>
         </div>
       )}
-      <Section n={1} need="done" title="Pick a package" sub={isFree ? `${freeLeft} free left. After that, pay by Zelle before Viktor starts.` : "The price is the price. Pay by Zelle before Viktor starts."}>
+      {driveMessage && <p role="status" className="text-sm text-stone-600">{driveMessage}</p>}
+      <Section n={1} need="done" title="Pick a package" sub={testPayment ? "This order uses a simulated payment." : isFree ? `${freeLeft} free left. After that, pay by Zelle before editing starts.` : "Pay by Zelle before editing starts."}>
         <div className="grid gap-2 sm:grid-cols-2">
           {REEL_TIERS.map(t => (
             <button
@@ -650,7 +480,7 @@ function NewReel({ as, onPlaced }: { as?: string; onPlaced: () => void }) {
         need={has("clips") ? "needed" : has("uploading") ? undefined : "done"}
         missing="Add at least one video"
         title="Add your videos"
-        sub={`Up to ${tier.maxClips}. Filmed in parts (in the car, arriving, the property, sitting down)? Add them all. Viktor stitches them into one Reel.`}
+        sub={`Up to ${tier.maxClips}. Filmed in parts (in the car, arriving, the property, sitting down)? Add them all. The editor stitches them into one Reel.`}
       >
         <UploadBox up={up} picked={picked} />
         {(vids === undefined || files.length > 0) && (
@@ -694,7 +524,7 @@ function NewReel({ as, onPlaced }: { as?: string; onPlaced: () => void }) {
                   className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-semibold ring-1 transition ${o.autoOrder ? "bg-[#0A0A0A] text-[#D9BC8C] ring-[#0A0A0A]" : "bg-white text-stone-800 ring-[#C9A86A] hover:bg-[#FBF6EC]"}`}
                 >
                   {o.autoOrder ? <Check className="size-4" /> : <Sparkles className="size-4 text-[#9C7434]" />}
-                  {o.autoOrder ? "Viktor will figure it out" : "Figure it out for me"}
+                  {o.autoOrder ? "the editor will figure it out" : "Figure it out for me"}
                 </button>
               )}
             </div>
@@ -753,7 +583,7 @@ function NewReel({ as, onPlaced }: { as?: string; onPlaced: () => void }) {
 
       <Section n={4} id="reel-step-look" flash={flash === "reel-step-look"} need={has("sample") ? "needed" : "done"} missing="Paste the sample link or upload it, or switch the sample off" title="Look & branding">
         <div className="space-y-4">
-          <SamplePicker sample={o.sample} onChange={smp => set("sample", smp)} />
+          <SamplePicker as={as} sample={o.sample} onChange={smp => set("sample", smp)} />
           <div>
             <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
               <span className="text-sm font-semibold text-stone-700">Style · Trending now + {STYLES.length - 1} SpaceMatch originals</span>
@@ -770,17 +600,13 @@ function NewReel({ as, onPlaced }: { as?: string; onPlaced: () => void }) {
                 </button>
               ))}
             </div>
-            <p className="mt-1.5 text-sm text-stone-600"><b>{STYLES.find(x => x.key === o.style)?.label}:</b> {STYLES.find(x => x.key === o.style)?.hint}</p>
+            <p className="mt-1.5 text-sm text-stone-600">The selected style sets the captions and title treatment.</p>
             {o.style === "trending" && (
               <div className="mt-2 rounded-xl bg-[#F7F5F1] px-3 py-2 text-sm text-stone-700" data-testid="trend-pick">
-                {trendPick ? (
-                  <><b>This week for {PURPOSES.find(x => x.key === o.purpose)?.label ?? "your Reel"}:</b> {trendPick.name}. {trendPick.how} <span className="text-stone-500">Checked {day(trendData!.checkedAt)}.</span></>
-                ) : (
-                  <>Viktor checks what's working on Instagram and TikTok right before editing and uses the best format for your Reel type.</>
-                )}
+                Choose a style to guide the look of your reel.
               </div>
             )}
-            {tier.broll && o.style !== "trending" && <p className="mt-1 text-sm text-stone-500">Signature Reels still get this week's trending hook and pacing, in the style you picked.</p>}
+            {tier.broll && o.style !== "trending" && <p className="mt-1 text-sm text-stone-500">Add supporting footage in the clip picker and tag it as B-roll.</p>}
           </div>
           <div data-testid="caption-spot">
             <div className="mb-1.5 flex items-center justify-between gap-2">
@@ -793,7 +619,7 @@ function NewReel({ as, onPlaced }: { as?: string; onPlaced: () => void }) {
             {o.captions ? (
               <>
                 <Chips label="Where captions go" options={CAPTION_SPOTS} value={o.captionSpot ?? spotOf(styleOf(o.style))} onChange={k => set("captionSpot", k as "low" | "mid" | "high")} />
-                <p className="mt-1.5 text-sm text-stone-500">Words never go over your face. You can fix any caption's wording after delivery, for free.</p>
+                <p className="mt-1.5 text-sm text-stone-500">Choose where the captions sit. You can fix their wording after delivery for free.</p>
               </>
             ) : (
               <p className="text-sm text-stone-500">No words on screen except titles and the end card.</p>
@@ -841,7 +667,7 @@ function NewReel({ as, onPlaced }: { as?: string; onPlaced: () => void }) {
             <Chips label="Pace" options={PACES} value={o.pace} onChange={k => set("pace", k)} />
           </div>
           <div>
-            <MusicPicker o={o} setO={setO} sounds={trendData?.sounds ?? []} />
+            <Chips label="Sound" options={[{ key: "none", label: "Original audio" }, { key: "none_trending", label: "Add music later in the posting app" }]} value={o.music} onChange={k => set("music", k)} />
           </div>
         </div>
       </Section>
@@ -853,18 +679,12 @@ function NewReel({ as, onPlaced }: { as?: string; onPlaced: () => void }) {
         )}
       </Section>
 
-      {tier.broll && (
-        <Section n={7} need="done" title="Team B-roll" sub="Branded clips from the B-Roll Library, cut in while you talk.">
-          <Chips label="B-roll" multi options={BROLL_PICKS} value={o.broll} onChange={k => toggleIn("broll", k)} />
-        </Section>
-      )}
-
       <Section n={fmtStep} id="reel-step-formats" flash={flash === "reel-step-formats"} need={has("formats") ? "needed" : "done"} missing="Pick at least one app" title="Where will you post it?" sub="You get a file sized for each one. All included.">
         <div className="grid gap-1.5 sm:grid-cols-2" role="group" aria-label="Formats">
           {FORMATS.map(f => {
             const on = o.formats.includes(f.key);
             return (
-              <button key={f.key} type="button" aria-pressed={on} onClick={() => toggleIn("formats", f.key)} className={`flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left ring-1 ${on ? "bg-[#0A0A0A] text-white ring-[#0A0A0A]" : "bg-[#F7F5F1] ring-black/10"}`}>
+              <button key={f.key} type="button" aria-pressed={on} onClick={() => toggleFormat(f.key)} className={`flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left ring-1 ${on ? "bg-[#0A0A0A] text-white ring-[#0A0A0A]" : "bg-[#F7F5F1] ring-black/10"}`}>
                 <span className={`flex size-6 shrink-0 items-center justify-center rounded-md ${on ? "bg-[#9C7434]" : "bg-white ring-1 ring-black/15"}`}>{on && <Check className="size-4" />}</span>
                 <span className="flex-1 text-[15px] font-semibold">{f.label}</span>
                 <span className={`text-sm ${on ? "text-stone-300" : "text-stone-500"}`}>{f.size}</span>
@@ -885,13 +705,13 @@ function NewReel({ as, onPlaced }: { as?: string; onPlaced: () => void }) {
             <div className="min-w-0">
               <div className="truncate text-[15px] font-semibold">{tier.name} · {picked.length || "no"} clip{picked.length === 1 ? "" : "s"} · {o.formats.length} format{o.formats.length === 1 ? "" : "s"}</div>
               {ready ? (
-                <div className="flex items-center gap-1.5 text-sm text-emerald-300"><CheckCircle2 className="size-4" /> All set. {isFree ? "Free Reel, Viktor starts right away" : "Pay by Zelle, then Viktor edits"}</div>
+                <div className="flex items-center gap-1.5 text-sm text-emerald-300"><CheckCircle2 className="size-4" /> All set. {testPayment ? "Editing starts after test approval" : isFree ? "Free reel, queued when you submit" : "Editing starts after Zelle confirmation"}</div>
               ) : (
                 <div className="text-sm text-[#F5B38F]" data-testid="missing-count">{missing.length === 1 ? "1 thing left" : `${missing.length} things left`}</div>
               )}
             </div>
             <button type="button" onClick={submit} disabled={busy} className={`flex shrink-0 items-center gap-2 rounded-xl px-4 py-2.5 font-bold disabled:opacity-60 ${ready ? "bg-[#9C7434]" : "bg-stone-700 text-stone-200"}`} data-testid="place-order" data-ready={ready}>
-              {busy ? <Loader2 className="size-4 animate-spin" /> : ready ? <Wallet className="size-4" /> : <ArrowDown className="size-4" />} {ready ? `Order · ${isFree ? "Free" : money(tier.price)}` : "What's left"}
+              {busy ? <Loader2 className="size-4 animate-spin" /> : ready ? <Wallet className="size-4" /> : <ArrowDown className="size-4" />} {ready ? testPayment ? "Add test request" : `Order · ${isFree ? "Free" : money(tier.price)}` : "What's left"}
             </button>
           </div>
           {!ready && (
@@ -913,7 +733,7 @@ function NewReel({ as, onPlaced }: { as?: string; onPlaced: () => void }) {
 
 type MyOrder = NonNullable<ReturnType<typeof useMineType>>[number];
 function useMineType() {
-  return useQuery(api.reelOrders.mine, {});
+  return useReels().data;
 }
 
 const TONE: Record<string, string> = {
@@ -932,13 +752,30 @@ export function ReelStatus({ s, label }: { s: string; label: string }) {
 }
 
 function PayCard({ o, zelleTo }: { o: MyOrder; zelleTo: string }) {
-  const markSent = useMutation(api.reelOrders.markSent);
+  const markSent = reelAction("sent");
   const p = o.openPayment;
   if (!p) return null;
+  if (p.test) {
+    return (
+      <div className="mt-3 space-y-2 rounded-xl bg-amber-50 p-4 text-amber-900" data-testid="test-pay-card">
+        <div className="font-semibold">Test payment · {money(p.amount)}</div>
+        <p className="text-sm">{p.status === "sent" ? "Open Profile → Approve requests to review this payment." : "Simulate the transfer here. No money is required."}</p>
+        {p.note && <p className="text-sm">{p.note}</p>}
+        {p.status === "sent" ? (
+          <Link to="/reels?tab=orders" className="inline-block text-sm font-semibold underline">Open approval queue</Link>
+        ) : (
+          <button type="button" className="rounded-lg bg-[#9C7434] px-4 py-2 text-sm font-semibold text-white"
+            onClick={() => markSent({ id: o._id }).then(() => toast.success("Test payment sent for approval.")).catch(e => toast.error(errMsg(e)))}
+            data-testid="sent-test-payment">Mark test payment sent</button>
+        )}
+      </div>
+    );
+  }
+
   if (p.status === "sent")
     return (
       <div className="mt-3 flex items-start gap-2 rounded-xl bg-sky-50 p-3 text-[15px] text-sky-900">
-        <Loader2 className="mt-0.5 size-4 shrink-0 animate-spin" /> Michael is checking for your {money(p.amount)} Zelle (memo {p.code}). You'll get an email when it's confirmed, and Viktor starts editing right after.
+        <Loader2 className="mt-0.5 size-4 shrink-0 animate-spin" /> Staff is checking for your {money(p.amount)} Zelle (memo {p.code}). You'll get an email when it's confirmed, and Editing starts editing right after.
       </div>
     );
   return (
@@ -954,14 +791,13 @@ function PayCard({ o, zelleTo }: { o: MyOrder; zelleTo: string }) {
       <button type="button" onClick={() => markSent({ id: o._id }).then(() => toast.success("Thanks! Michael will confirm it.")).catch(e => toast.error(errMsg(e)))} className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#9C7434] py-3 font-bold text-white" data-testid="sent-zelle">
         <Send className="size-4" /> I sent the Zelle
       </button>
-      <PayByCard kind="reel" id={o._id} amount={p.amount} after="Viktor starts editing as soon as the card goes through." />
       <p className="text-sm text-stone-500">Open your bank app, choose Zelle, and send to the address above with the memo code. Nothing is edited until the payment is confirmed.</p>
     </div>
   );
 }
 
 function CaptionEditor({ o }: { o: MyOrder }) {
-  const edit = useMutation(api.reelOrders.editCaptions);
+  const edit = reelAction("captions");
   const lines = o.captionLines ?? [];
   const [draft, setDraft] = useState<Record<number, string>>({});
   const [open, setOpen] = useState(false);
@@ -983,7 +819,7 @@ function CaptionEditor({ o }: { o: MyOrder }) {
               </label>
             ))}
           </div>
-          <button type="button" disabled={!changed.length} onClick={() => edit({ id: o._id, edits: changed.map(([i, text]) => ({ i: Number(i), text })) }).then(() => { setDraft({}); setOpen(false); toast.success("Sent. Viktor re-renders with your captions."); }).catch(e => toast.error(errMsg(e)))} className="rounded-lg bg-[#0A0A0A] px-4 py-2 font-semibold text-white disabled:opacity-50">
+          <button type="button" disabled={!changed.length} onClick={() => edit({ id: o._id, edits: changed.map(([i, text]) => ({ i: Number(i), text })) }).then(() => { setDraft({}); setOpen(false); toast.success("Sent. The editor re-renders with your captions."); }).catch(e => toast.error(errMsg(e)))} className="rounded-lg bg-[#0A0A0A] px-4 py-2 font-semibold text-white disabled:opacity-50">
             Send {changed.length || ""} caption fix{changed.length === 1 ? "" : "es"}
           </button>
           <p className="text-sm text-stone-500">Caption fixes are free and don't use a revision.</p>
@@ -998,7 +834,6 @@ const clock = (ms: number) => {
   const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), sec = t % 60;
   return h ? `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}` : `${m}:${String(sec).padStart(2, "0")}`;
 };
-const timeOf = (t: number) => new Date(t).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 
 function useNow(ms = 1000) {
   const [now, setNow] = useState(Date.now());
@@ -1015,14 +850,13 @@ function ReelProgress({ o }: { o: MyOrder }) {
   const editing = o.status === "editing";
   const cur = editing ? Math.max(0, REEL_STAGES.findIndex(st => st.key === (o.stage ?? "clips"))) : -1;
   const waitingSince = o.queuedAt ?? o.createdAt;
-  const next = nextQueueCheck(now);
   const ahead = o.queueAhead ?? 0;
   return (
     <div className="mt-3 rounded-xl bg-[#F7F5F1] p-3 ring-1 ring-black/5" data-testid="reel-progress">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="flex items-center gap-2 text-[15px] font-semibold text-[#0A0A0A]">
           {editing ? <Loader2 className="size-4 animate-spin text-[#9C7434]" /> : <Clapperboard className="size-4 text-[#9C7434]" />}
-          {editing ? "Viktor is editing your Reel" : ahead ? `In line · ${ahead} ahead of you` : "In line · you're next"}
+          {editing ? "Editing your Reel" : ahead ? `In line · ${ahead} ahead of you` : "Waiting for an editor"}
         </span>
         <span className="rounded-full bg-white px-2.5 py-1 font-mono text-sm tabular-nums text-stone-700 ring-1 ring-black/5" data-testid="reel-timer" aria-label={editing ? "Editing time" : "Waiting time"}>
           {editing ? "Editing " : "Waiting "}{clock(now - (editing ? o.pickedUpAt ?? now : waitingSince))}
@@ -1030,7 +864,7 @@ function ReelProgress({ o }: { o: MyOrder }) {
       </div>
       {!editing && (
         <p className="mt-1.5 text-sm text-stone-600">
-          {o.free ? "Free Reel." : "Paid."} Viktor checks for new orders every 15 minutes during the day. Next check at {timeOf(next)} (in {Math.max(1, Math.ceil((next - now) / 60_000))} min).
+          {o.free ? "Free Reel." : "Paid."} Editing starts when a worker is available.
         </p>
       )}
       <ol className="mt-3 grid gap-1.5 sm:grid-cols-2">
@@ -1047,14 +881,14 @@ function ReelProgress({ o }: { o: MyOrder }) {
           );
         })}
       </ol>
-      {editing && o.statusNote && o.statusNote !== "Viktor is editing your Reel" && <p className="mt-2 text-sm text-stone-600">{o.statusNote}</p>}
-      <p className="mt-2 text-sm text-stone-500">You'll get an email and a notification the moment it's ready. You can close this page.</p>
+      {editing && o.statusNote && o.statusNote !== "Editing your Reel" && <p className="mt-2 text-sm text-stone-600">{o.statusNote}</p>}
+      <p className="mt-2 text-sm text-stone-500">You'll get an email when it's ready. You can close this page.</p>
     </div>
   );
 }
 
 // One file per app. A real Download button, because iPhone's video player has no Download item (Michael 11-12).
-function OutputRow({ x, agentName }: { x: { format: string; url: string | null; size: number }; agentName: string }) {
+function OutputRow({ x, agentName }: { x: { format: string; url: string | null; size?: number }; agentName: string }) {
   const f = formatOf(x.format);
   const label = f?.label ?? x.format;
   const { state, pct, run } = useSaveVideo(x.url, videoFileName(agentName, "Reel", label), `${label} Reel`);
@@ -1062,7 +896,7 @@ function OutputRow({ x, agentName }: { x: { format: string; url: string | null; 
     <div className="flex items-center gap-2 rounded-xl bg-[#F7F5F1] py-2 pl-3 pr-2 ring-1 ring-black/10" data-testid="reel-output">
       <div className="min-w-0 flex-1">
         <div className="text-[15px] font-semibold leading-tight">{label}</div>
-        <div className="whitespace-nowrap text-sm text-stone-600">{f?.size} · {mb(x.size)}</div>
+        <div className="whitespace-nowrap text-sm text-stone-600">{f?.size}{x.size ? ` · ${mb(x.size)}` : ""}</div>
       </div>
       {x.url && <a href={x.url} target="_blank" rel="noreferrer" aria-label={`Open ${label} in a new tab`} title="Open in a new tab" className="flex size-10 shrink-0 items-center justify-center rounded-lg text-stone-500 hover:bg-black/5 hover:text-stone-800 sm:size-11"><ExternalLink className="size-4" /></a>}
       <button type="button" disabled={!x.url || state === "loading"} data-testid="reel-download" data-state={state}
@@ -1081,10 +915,10 @@ function OrderCard({ o, zelleTo, open: open0 }: { o: MyOrder; zelleTo: string; o
   const [open, setOpen] = useState(!!open0);
   const [rev, setRev] = useState("");
   const [ans, setAns] = useState("");
-  const requestRevision = useMutation(api.reelOrders.requestRevision);
-  const answer = useMutation(api.reelOrders.answer);
-  const cancel = useMutation(api.reelOrders.cancel);
-  const markDone = useMutation(api.reelOrders.markDone);
+  const requestRevision = reelAction("revision");
+  const answer = reelAction("answer");
+  const cancel = reelAction("cancel");
+  const markDone = reelAction("done");
   const opts = o.options as ReelOptions;
   const vertical = o.outputs.find(x => formatOf(x.format)?.group === "vertical") ?? o.outputs[0];
   return (
@@ -1092,7 +926,7 @@ function OrderCard({ o, zelleTo, open: open0 }: { o: MyOrder; zelleTo: string; o
       <div className="flex items-start justify-between gap-2">
         <div>
           <div className="font-semibold text-[#0A0A0A]">{o.tierName}{opts.title ? ` · ${opts.title}` : ""}</div>
-          <div className="text-sm text-stone-500">Ordered {day(o.createdAt)} · {o.free ? "Free Reel" : money(o.price)} · {o.clips.length} clip{o.clips.length === 1 ? "" : "s"}{o.version > 1 ? ` · version ${o.version}` : ""}</div>
+          <div className="text-sm text-stone-500">Ordered {day(o.createdAt)} · {o.testOrder ? "Test request" : o.free ? "Free Reel" : money(o.price)} · {o.clips.length} clip{o.clips.length === 1 ? "" : "s"}{o.version > 1 ? ` · version ${o.version}` : ""}</div>
         </div>
         <ReelStatus s={o.status} label={o.statusLabel} />
       </div>
@@ -1104,18 +938,18 @@ function OrderCard({ o, zelleTo, open: open0 }: { o: MyOrder; zelleTo: string; o
         <div className="mt-3 space-y-2 rounded-xl bg-red-50 p-3">
           <div className="flex gap-2 text-[15px] text-red-900"><MessageSquare className="mt-0.5 size-4 shrink-0" /> {o.question}</div>
           <textarea value={ans} onChange={e => setAns(e.target.value)} rows={2} className="w-full rounded-lg border border-red-200 bg-white px-3 py-2 text-[15px]" placeholder="Your answer" aria-label="Your answer" />
-          <button type="button" disabled={!ans.trim()} onClick={() => answer({ id: o._id, text: ans }).then(() => { setAns(""); toast.success("Sent. Viktor picks it back up."); }).catch(e => toast.error(errMsg(e)))} className="rounded-lg bg-[#0A0A0A] px-4 py-2 font-semibold text-white disabled:opacity-50">Send answer</button>
+          <button type="button" disabled={!ans.trim()} onClick={() => answer({ id: o._id, text: ans }).then(() => { setAns(""); toast.success("Sent. The editor picks it back up."); }).catch(e => toast.error(errMsg(e)))} className="rounded-lg bg-[#0A0A0A] px-4 py-2 font-semibold text-white disabled:opacity-50">Send answer</button>
         </div>
       )}
 
-      {(o.status === "delivered" || o.status === "done") && o.outputs.length > 0 && (
+      {o.outputs.length > 0 && (
         <div className="mt-3 grid gap-3 sm:grid-cols-[180px_1fr]">
           {vertical?.url && <video src={vertical.url} controls playsInline preload="metadata" className="aspect-[9/16] w-full max-w-[220px] rounded-xl bg-black" />}
           <div className="space-y-1.5">
-            {o.viktorNote && <p className="text-[15px] text-stone-700">{o.viktorNote}</p>}
+            {o.deliveryNote && <p className="text-[15px] text-stone-700">{o.deliveryNote}</p>}
             {o.outputs.map(x => <OutputRow key={x.format} x={x} agentName={o.agentName} />)}
             {isIOS() && <p className="text-sm text-stone-500" data-testid="reel-ios-hint">On iPhone: tap Download, then choose <b>Save Video</b> to put it in your Photos.</p>}
-            <CaptionEditor o={o} />
+            {o.canEditCaptions && ["delivered", "done"].includes(o.status) && <CaptionEditor o={o} />}
             <div className="pt-2">
               <div className="mb-1 text-sm font-semibold text-stone-700">
                 Ask for changes · {o.freeRevisionsLeft > 0 ? `${o.freeRevisionsLeft} free revision${o.freeRevisionsLeft > 1 ? "s" : ""} left` : `${money(EXTRA_REVISION_PRICE)} by Zelle`}
@@ -1129,7 +963,7 @@ function OrderCard({ o, zelleTo, open: open0 }: { o: MyOrder; zelleTo: string; o
           </div>
         </div>
       )}
-      {o.status === "cancelled" && o.statusNote && <p className="mt-2 text-sm text-stone-500">{o.statusNote}</p>}
+      {["cancelled", "failed"].includes(o.status) && o.statusNote && <p className="mt-2 text-sm text-stone-500">{o.statusNote}</p>}
 
       <button type="button" onClick={() => setOpen(!open)} className="mt-3 flex items-center gap-1 text-sm font-semibold text-stone-500">
         <ChevronDown className={`size-4 transition ${open ? "rotate-180" : ""}`} /> {open ? "Hide" : "Show"} what you ordered
@@ -1156,62 +990,68 @@ function OrderCard({ o, zelleTo, open: open0 }: { o: MyOrder; zelleTo: string; o
   );
 }
 
-function MyReels({ as, firstOpen }: { as?: string; firstOpen: boolean }) {
-  const rows = useQuery(api.reelOrders.mine, { as });
-  const cfg = useQuery(api.reelOrders.config);
-  if (!rows || !cfg) return <div className="h-32 animate-pulse rounded-2xl bg-stone-100" />;
+function MyReels({ as, firstOpen, zelleTo }: { as?: string; firstOpen: boolean; zelleTo: string }) {
+  const { data: rows, error, reload } = useReels(as);
+  if (error && !rows) return <LoadError error={error} onRetry={() => void reload()} what="your reels" />;
+  if (!rows) return <div className="h-32 animate-pulse rounded-2xl bg-stone-100" />;
   if (!rows.length) return <p className="rounded-2xl bg-white p-5 text-stone-600 ring-1 ring-black/5">No Reels yet. Start one on the New Reel tab.</p>;
-  return <ul className="space-y-2">{rows.map((o, i) => <OrderCard key={o._id} o={o} zelleTo={cfg.zelleTo} open={firstOpen && i === 0} />)}</ul>;
+  return <ul className="space-y-2">{rows.map((o, i) => <OrderCard key={o._id} o={o} zelleTo={zelleTo} open={firstOpen && i === 0} />)}</ul>;
 }
 
 // ---------- admin ----------
 
 function AdminOrders() {
-  const q = useQuery(api.reelOrders.queue);
-  const confirm = useMutation(api.reelOrders.confirmPayment);
-  const adminCancel = useMutation(api.reelOrders.adminCancel);
+  const { data: q, error, reload } = useReelQueue();
+  const confirm = reelAction("confirm");
+  const adminCancel = reelAction("cancel");
+  if (error && !q) return <LoadError error={error} onRetry={() => void reload()} what="reel orders" />;
   if (!q) return <div className="h-32 animate-pulse rounded-2xl bg-stone-100" />;
   const toConfirm = q.orders.flatMap(o => o.payments.filter(p => p.status === "sent").map(p => ({ o, p })));
   const run = (p: Promise<unknown>, msg: string) => p.then(() => toast.success(msg)).catch(e => toast.error(errMsg(e)));
   return (
     <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-lg font-bold">Approve requests</h2>
+        {q.canTestPayments && <Link to="/reels?tab=new&test=1" className="rounded-lg bg-[#0A0A0A] px-4 py-2 text-sm font-semibold text-white" data-testid="add-test-reel">Add test request</Link>}
+      </div>
       <section>
-        <h2 className="mb-2 text-lg font-bold">Zelle to confirm {toConfirm.length ? `(${toConfirm.length})` : ""}</h2>
+        <h3 className="mb-2 font-semibold">Payments awaiting approval {toConfirm.length ? `(${toConfirm.length})` : ""}</h3>
         {toConfirm.length === 0 ? (
-          <p className="text-[15px] text-stone-500">Nothing waiting. You get an email and a phone alert when an agent says they sent a Zelle.</p>
+          <p className="text-[15px] text-stone-500">No payments are waiting for approval.</p>
         ) : (
           <ul className="space-y-2">
             {toConfirm.map(({ o, p }) => (
               <li key={p.code} className="rounded-2xl bg-white p-4 ring-2 ring-[#9C7434]/40" data-testid="confirm-row">
                 <div className="flex flex-wrap items-baseline justify-between gap-2">
-                  <div className="text-[17px] font-bold">{money(p.amount)} from {o.agentName}</div>
+                  <div className="text-[17px] font-bold">{money(p.amount)} from {o.agentName}{p.test && <span className="ml-2 text-sm text-amber-800">Test</span>}</div>
                   <div className="font-mono text-[15px] font-bold text-[#9C7434]">memo {p.code}</div>
                 </div>
                 <div className="text-sm text-stone-500">{p.kind === "order" ? o.tierName : "Extra revision"} · sent {day(p.sentAt)}</div>
-                {q.canConfirm ? (
+                {(p.test ? q.canTestPayments : q.canConfirm) ? (
                   <div className="mt-2 flex flex-wrap gap-2">
-                    <button type="button" onClick={() => run(confirm({ id: o._id, code: p.code, received: true }), "Confirmed. Viktor will start editing.")} className="flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 font-semibold text-white" data-testid="confirm-received"><CheckCircle2 className="size-4" /> Received</button>
-                    <button type="button" onClick={() => run(confirm({ id: o._id, code: p.code, received: false }), "Agent asked to check their Zelle")} className="flex items-center gap-1.5 rounded-xl bg-stone-100 px-4 py-2 font-semibold text-stone-700"><XCircle className="size-4" /> Not in my account</button>
+                    <button type="button" onClick={() => run(confirm({ id: o._id, code: p.code, received: true }), "Confirmed. The reel is queued for editing.")} className="flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 font-semibold text-white" data-testid="confirm-received"><CheckCircle2 className="size-4" /> {p.test ? "Approve test payment" : "Received"}</button>
+                    <button type="button" onClick={() => run(confirm({ id: o._id, code: p.code, received: false }), p.test ? "Test payment rejected" : "Agent asked to check their Zelle")} className="flex items-center gap-1.5 rounded-xl bg-stone-100 px-4 py-2 font-semibold text-stone-700"><XCircle className="size-4" /> {p.test ? "Reject test payment" : "Not in my account"}</button>
                   </div>
-                ) : <p className="mt-2 text-sm text-stone-500">Only Michael can confirm payments.</p>}
+                ) : <p className="mt-2 text-sm text-stone-500">Only designated staff can confirm payments.</p>}
               </li>
             ))}
           </ul>
         )}
       </section>
       <section>
-        <h2 className="mb-2 text-lg font-bold">All orders</h2>
+        <h2 className="mb-2 text-lg font-bold">{q.isStaff ? "All orders" : "Your test requests"}</h2>
         {q.orders.length === 0 ? <p className="text-[15px] text-stone-500">No orders yet.</p> : (
           <ul className="space-y-1.5">
             {q.orders.map(o => (
               <li key={o._id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-white px-3.5 py-2.5 ring-1 ring-black/5">
                 <div className="min-w-0">
                   <div className="truncate text-[15px] font-semibold">{o.agentName} · {o.tierName}{(o.options as ReelOptions).title ? ` · ${(o.options as ReelOptions).title}` : ""}</div>
-                  <div className="text-sm text-stone-500">{day(o.createdAt)} · {o.free ? "free Reel" : `paid ${money(o.paid)}`} · cost {money(o.costUsd)}{o.version ? ` · v${o.version}` : ""}{o.revisions.length ? ` · ${o.revisions.length} revision${o.revisions.length > 1 ? "s" : ""}` : ""}</div>
+                  <div className="text-sm text-stone-500">{day(o.createdAt)} · {o.testOrder ? "test request" : o.free ? "free Reel" : `paid ${money(o.paid)}`} · cost {money(o.costUsd)}{o.version ? ` · v${o.version}` : ""}{o.revisions.length ? ` · ${o.revisions.length} revision${o.revisions.length > 1 ? "s" : ""}` : ""}</div>
                 </div>
                 <div className="flex items-center gap-2">
                   <ReelStatus s={o.status} label={o.statusLabel} />
-                  {!["cancelled", "done", "delivered"].includes(o.status) && (
+                  {o.status === "failed" && <button type="button" onClick={() => run(reelAction("retry")({ id: o._id }), "Queued for another attempt")} className="text-sm font-semibold underline">Retry</button>}
+                  {(q.isStaff ? !["cancelled", "done", "delivered"].includes(o.status) : o.status === "awaiting_payment") && (
                     <button type="button" onClick={() => window.confirm("Cancel this order?") && run(adminCancel({ id: o._id }), "Cancelled")} className="text-sm text-stone-400 underline">Cancel</button>
                   )}
                 </div>
@@ -1225,14 +1065,15 @@ function AdminOrders() {
 }
 
 function Ledger() {
-  const q = useQuery(api.reelOrders.queue);
+  const { data: q, error, reload } = useReelQueue();
+  if (error && !q) return <LoadError error={error} onRetry={() => void reload()} what="reel orders" />;
   if (!q) return <div className="h-32 animate-pulse rounded-2xl bg-stone-100" />;
   const t = q.totals;
   const rows = q.orders.filter(o => o.paid > 0 || o.costCredits > 0);
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-        {([["Collected", money(t.revenue)], ["Viktor cost", money(t.cost)], ["Profit", money(t.profit)], ["Margin", `${Math.round(t.margin * 100)}%`]] as const).map(([k, val]) => (
+        {([["Collected", money(t.revenue)], ["Historical editing cost", money(t.cost)], ["Payments to review", money(t.owedToConfirm)]] as const).map(([k, val]) => (
           <div key={k} className="rounded-2xl bg-white p-3 ring-1 ring-black/5">
             <div className="font-serif text-2xl font-bold">{val}</div>
             <div className="text-sm text-stone-500">{k}</div>
@@ -1257,7 +1098,7 @@ function Ledger() {
                   <td className="p-2.5">{o.tierName}{o.free ? " (free)" : ""}{o.revisions.length ? ` + ${o.revisions.length} rev` : ""}</td>
                   <td className="p-2.5">{money(o.paid)}</td>
                   <td className="p-2.5">{o.costCredits.toLocaleString()}</td>
-                  <td className="p-2.5">{money(o.costUsd)}</td>
+                  <td className="p-2.5">{o.costCredits ? money(o.costUsd) : "—"}</td>
                   <td className={`p-2.5 font-semibold ${flag ? "text-red-700" : "text-emerald-700"}`}>{money(profit)}{flag ? " ⚠" : ""}</td>
                 </tr>
               );
@@ -1265,7 +1106,7 @@ function Ledger() {
           </tbody>
         </table>
       </div>
-      <p className="text-sm text-stone-500">Cost = the credits Viktor used on that order (each order is edited in its own run) × $0.0025. Red = cost above half the price.</p>
+      <p className="text-sm text-stone-500">Historical editing costs use the imported credit ledger. New worker costs are not included.</p>
     </div>
   );
 }
@@ -1273,30 +1114,34 @@ function Ledger() {
 // ---------- page ----------
 
 export function ReelStudioPage() {
-  const cfg = useQuery(api.reelOrders.config);
+  const { data: cfg, error, reload } = useOutletContext<ReelConfigResult>();
   const [params, setParams] = useSearchParams();
   const tab = params.get("tab") ?? "new";
+  const testPayment = !!cfg?.canTestPayments && params.get("test") === "1";
   const [as, setAs] = useState<string | undefined>(undefined);
   const [justPlaced, setJustPlaced] = useState(false);
-  const setTab = (t: string) => setParams(p => { p.set("tab", t); return p; }, { replace: true });
+  const setTab = (t: string) => setParams(p => { p.set("tab", t); p.delete("test"); return p; }, { replace: true });
   const tabs = useMemo(() => {
     const t: { k: string; label: string; Icon: typeof Film; n?: number }[] = [
       { k: "new", label: "New Reel", Icon: CirclePlus },
       { k: "mine", label: "My Reels", Icon: Film },
     ];
-    if (cfg?.isAdmin) t.push({ k: "orders", label: "Orders", Icon: ClipboardList, n: cfg.toConfirm || undefined }, { k: "ledger", label: "Ledger", Icon: Receipt });
+    if (cfg?.isStaff || cfg?.canTestPayments) t.push({ k: "orders", label: "Orders", Icon: ClipboardList, n: cfg.toConfirm || undefined });
+    if (cfg?.isAdmin) t.push({ k: "ledger", label: "Ledger", Icon: Receipt });
     return t;
   }, [cfg]);
+  if (error && !cfg) return <LoadError error={error} onRetry={() => void reload()} what="Reel Studio" />;
+  if (!cfg) return <div role="status" className="h-28 animate-pulse rounded-2xl bg-stone-100" aria-label="Loading Reel Studio" />;
   return (
     <div className="mx-auto max-w-3xl space-y-4">
       <div className="flex items-start gap-3">
         <span className="flex size-12 shrink-0 items-center justify-center rounded-2xl bg-[#0A0A0A]"><Clapperboard className="size-6 text-[#D9BC8C]" /></span>
         <div>
           <h1 className="font-display text-2xl sm:text-3xl">Reel Studio</h1>
-          <p className="text-stone-600">Pick your clips, style and colors. Pay by Zelle, and Viktor edits a ready-to-post Reel sized for every app you use.</p>
+          <p className="text-stone-600">Pick your clips, style and colors. Pay by Zelle, and our editor prepares a ready-to-post Reel sized for every app you use.</p>
         </div>
       </div>
-      {cfg?.isStaff && cfg.agents.length > 0 && (tab === "new" || tab === "mine") && (
+      {!testPayment && cfg?.isStaff && cfg.agents.length > 0 && (tab === "new" || tab === "mine") && (
         <label className="flex items-center gap-2 text-sm text-stone-600">Order for
           <select value={as ?? ""} onChange={e => setAs(e.target.value || undefined)} className="rounded-lg border border-stone-200 bg-white px-2 py-1.5 text-[15px]" aria-label="Order for">
             <option value="">Me</option>
@@ -1318,9 +1163,9 @@ export function ReelStudioPage() {
           );
         })}
       </div>
-      {tab === "new" && <NewReel as={as} onPlaced={() => { setJustPlaced(true); setTab("mine"); window.scrollTo({ top: 0 }); }} />}
-      {tab === "mine" && <MyReels as={as} firstOpen={justPlaced} />}
-      {tab === "orders" && cfg?.isAdmin && <AdminOrders />}
+      {tab === "new" && <NewReel key={`${as ?? "self"}:${testPayment}`} as={testPayment ? undefined : as} testPayment={testPayment} onPlaced={() => { if (testPayment) setAs(undefined); setJustPlaced(true); setTab("mine"); window.scrollTo({ top: 0 }); }} />}
+      {tab === "mine" && <MyReels as={as} firstOpen={justPlaced} zelleTo={cfg.zelleTo} />}
+      {tab === "orders" && (cfg.isStaff || cfg.canTestPayments) && <AdminOrders />}
       {tab === "ledger" && cfg?.isAdmin && <Ledger />}
     </div>
   );

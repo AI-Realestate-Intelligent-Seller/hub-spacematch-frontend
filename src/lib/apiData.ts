@@ -52,7 +52,7 @@ export async function apiSend<T>(method: "POST" | "PATCH" | "PUT" | "DELETE", pa
  * `data` is undefined while loading (like Convex's useQuery); `notFound` is set on a 404.
  * Pass key = null to skip.
  */
-export function useApiData<T>(key: string | null, fetcher: () => Promise<T>, opts: { pollMs?: number } = {}) {
+export function useApiData<T>(key: string | null, fetcher: () => Promise<T>, opts: { pollMs?: number; pollWhen?: (data: T | undefined) => boolean } = {}) {
   const [state, setState] = useState<{ key: string | null; data?: T; error?: ApiError | Error }>({ key: null });
   const fetchRef = useRef(fetcher);
   const requestRef = useRef(0);
@@ -83,6 +83,10 @@ export function useApiData<T>(key: string | null, fetcher: () => Promise<T>, opt
     return load();
   }, [key, load]);
 
+  const current = state.key === key;
+  const data = current ? state.data : undefined;
+  const pollMs = !opts.pollWhen || opts.pollWhen(data) ? opts.pollMs : undefined;
+
   useEffect(() => {
     if (key === null) return;
     void load();
@@ -90,18 +94,22 @@ export function useApiData<T>(key: string | null, fetcher: () => Promise<T>, opt
     const idle = () => document.visibilityState === "visible" && inFlightRef.current === 0;
     const onFocus = () => idle() && void load();
     document.addEventListener("visibilitychange", onFocus);
-    const timer = opts.pollMs ? window.setInterval(() => idle() && void load(), opts.pollMs) : undefined;
     return () => {
       requestRef.current++;
       listeners.delete(load);
       document.removeEventListener("visibilitychange", onFocus);
-      if (timer) window.clearInterval(timer);
     };
-  }, [key, load, opts.pollMs]);
+  }, [key, load]);
 
-  const current = state.key === key;
+  useEffect(() => {
+    if (key === null || !pollMs) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible" && inFlightRef.current === 0) void load();
+    }, pollMs);
+    return () => window.clearInterval(timer);
+  }, [key, load, pollMs]);
   return {
-    data: current ? state.data : undefined,
+    data,
     error: current ? state.error : undefined,
     notFound: current && state.error instanceof ApiError && state.error.status === 404,
     reload,

@@ -22,6 +22,7 @@ import {
 import { useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router";
 import { api } from "../../convex/_generated/api";
+import { type ReelConfigResult, useReelConfig } from "@/lib/reelStudioApi";
 import { useApiData } from "@/lib/apiData";
 import { adOrdersApi } from "@/lib/listingsApi";
 import { areaOf } from "../lib/adoptionAreas";
@@ -64,11 +65,11 @@ function useAdoptionPing(path: string) {
   }, [path, ping]);
 }
 
-function UserMenu() {
+function UserMenu({ reelConfig }: { reelConfig: ReelConfigResult["data"] }) {
   const user = useCurrentUser(); // new backend session
   const me = useQuery(api.hubMe.me);
   const adPending = useApiData("ad-orders:config", () => adOrdersApi.config(), { pollMs: 120_000 }).data?.pending ?? 0; // new backend
-  const reelConfirm = useQuery(api.reelOrders.config)?.toConfirm ?? 0;
+  const reelConfirm = reelConfig?.toConfirm ?? 0;
   const listConfirm = useQuery(api.sellerLists.config, {})?.toConfirm ?? 0;
   const { signOut } = useSession(); // new backend: clears the session cookie
   const [large, setLarge] = useState(() => document.documentElement.classList.contains("text-large"));
@@ -130,9 +131,14 @@ function UserMenu() {
             <Link to="/ad-orders"><Megaphone className="size-4" /> Ad orders{adPending ? <span className="ml-auto rounded-full bg-[#9C7434] px-2 py-0.5 text-xs font-bold text-white">{adPending}</span> : null}</Link>
           </DropdownMenuItem>
         )}
-        {reelConfirm > 0 && (
+        {(reelConfig?.isStaff || reelConfig?.canTestPayments) && (
           <DropdownMenuItem asChild>
-            <Link to="/reels"><Clapperboard className="size-4" /> Reels to confirm<span className="ml-auto rounded-full bg-[#9C7434] px-2 py-0.5 text-xs font-bold text-white">{reelConfirm}</span></Link>
+            <Link to="/reels?tab=orders" data-testid="menu-approve-requests"><Clapperboard className="size-4" /> Approve requests{reelConfirm > 0 && <span className="ml-auto rounded-full bg-[#9C7434] px-2 py-0.5 text-xs font-bold text-white">{reelConfirm}</span>}</Link>
+          </DropdownMenuItem>
+        )}
+        {reelConfig?.canTestPayments && (
+          <DropdownMenuItem asChild>
+            <Link to="/reels?tab=new&test=1" data-testid="menu-add-test-request"><Clapperboard className="size-4" /> Add test request</Link>
           </DropdownMenuItem>
         )}
         {listConfirm > 0 && (
@@ -229,6 +235,7 @@ function BackBar({ path }: { path: string }) {
 }
 
 export function AppLayout() {
+  const reelConfig = useReelConfig();
   const badge = useInboxBadge();
   const path = useLocation().pathname;
   useAdoptionPing(path);
@@ -265,7 +272,7 @@ export function AppLayout() {
               </NavLink>
             ))}
           </nav>
-          <div className="ml-auto"><UserMenu /></div>
+          <div className="ml-auto"><UserMenu reelConfig={reelConfig.data} /></div>
         </div>
       </header>
 
@@ -273,7 +280,7 @@ export function AppLayout() {
 
       <main className="mx-auto max-w-6xl px-4 pb-28 pt-4 lg:px-6 md:pb-12">
         <BackBar path={path} />
-        <Outlet />
+        <Outlet context={reelConfig} />
       </main>
 
       {/* Phone tab bar — feels like a native app once added to the home screen */}
