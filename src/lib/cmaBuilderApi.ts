@@ -66,7 +66,10 @@ export type PublishedResearch = {
   collectedAt: string; facts: ResearchFact[];
   sales: { date: string; price: number; deed: string; marketCandidate: boolean }[];
   assessments: { year: number; value: number; stage: string }[];
+  /** Where the county records came from (absent on research saved before suburban counties: Cook). */
+  county?: ResearchCounty;
 };
+export type ResearchCounty = { name: string; provider: string; salesUrl?: string; assessmentsUrl?: string; valueLabel?: string };
 export type MarketingFacts = { available: false; rules: string[] } | {
   available: true; propertyFacts: ResearchFact[]; source: string; rules: string[];
   estimatedValue: number | null; range: Range | null; askingPrice: number | null;

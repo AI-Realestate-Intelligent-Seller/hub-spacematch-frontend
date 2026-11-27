@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { toast } from "sonner";
 import { apiErrorMessage } from "@/lib/apiData";
-import { cmaBuilderApi, compactMoney, money, type AgentResearch, type PublishedResearch, type Report, type ResearchFact, shortDate } from "@/lib/cmaBuilderApi";
+import { cmaBuilderApi, compactMoney, money, type AgentResearch, type PublishedResearch, type Report, type ResearchCounty, type ResearchFact, shortDate } from "@/lib/cmaBuilderApi";
 import { btnGhost } from "./shared";
 
 const subjectFields = { beds: "beds", baths: "baths", yearBuilt: "yearBuilt" } as const;
@@ -24,7 +24,8 @@ function Trend({ title, values }: { title: string; values: { period: string; val
   );
 }
 
-function History({ sales, assessments }: Pick<PublishedResearch, "sales" | "assessments">) {
+function History({ sales, assessments, county }: Pick<PublishedResearch, "sales" | "assessments" | "county">) {
+  const valueLabel = county?.valueLabel ?? "Assessed value";
   const marketSales = sales.filter(s => s.marketCandidate);
   const latest = marketSales[0];
   const earliest = marketSales.at(-1);
@@ -46,9 +47,9 @@ function History({ sales, assessments }: Pick<PublishedResearch, "sales" | "asse
       )}
       {assessments.length > 0 && (
         <section className="min-w-0 space-y-2">
-          <h3 className="font-semibold">Assessed values</h3>
-          <p className="text-sm text-stone-600">County assessment roll values for property taxation.</p>
-          <Trend title="Assessed value" values={assessments.slice().reverse().map(a => ({ period: String(a.year), value: a.value }))} />
+          <h3 className="font-semibold">{county?.valueLabel ? `${county.valueLabel} history` : "Assessed values"}</h3>
+          <p className="text-sm text-stone-600">{county?.valueLabel ? `${county.provider}: the county's estimate of market value, used for property taxation.` : "County assessment roll values for property taxation."}</p>
+          <Trend title={valueLabel} values={assessments.slice().reverse().map(a => ({ period: String(a.year), value: a.value }))} />
           <div className="max-h-52 overflow-auto">
             <table className="w-full text-left text-sm">
               <thead><tr><th>Year</th><th>Assessment</th><th>Roll stage</th><th>YoY</th></tr></thead>
@@ -86,12 +87,14 @@ export function PublishedPropertyResearch({ research }: { research: PublishedRes
   );
 }
 
-function HistorySources({ sales, assessments }: Pick<PublishedResearch, "sales" | "assessments">) {
+const COOK_COUNTY: ResearchCounty = { name: "Cook County", provider: "Cook County Assessor", salesUrl: "https://datacatalog.cookcountyil.gov/resource/wvhk-k5uv.json", assessmentsUrl: "https://datacatalog.cookcountyil.gov/resource/uzyt-m557.json" };
+
+function HistorySources({ sales, assessments, county = COOK_COUNTY }: Pick<PublishedResearch, "sales" | "assessments" | "county">) {
   if (!sales.length && !assessments.length) return null;
   return (
     <div className="flex flex-wrap gap-3 text-xs text-[#77551E]">
-      {sales.length > 0 && <a className="underline" href="https://datacatalog.cookcountyil.gov/resource/wvhk-k5uv.json" target="_blank" rel="noreferrer">Cook County parcel sales</a>}
-      {assessments.length > 0 && <a className="underline" href="https://datacatalog.cookcountyil.gov/resource/uzyt-m557.json" target="_blank" rel="noreferrer">Cook County assessed values</a>}
+      {sales.length > 0 && county.salesUrl && <a className="underline" href={county.salesUrl} target="_blank" rel="noreferrer">{county.name} parcel sales</a>}
+      {assessments.length > 0 && county.assessmentsUrl && <a className="underline" href={county.assessmentsUrl} target="_blank" rel="noreferrer">{county.name} {(county.valueLabel ?? "assessed values").toLowerCase()}</a>}
     </div>
   );
 }

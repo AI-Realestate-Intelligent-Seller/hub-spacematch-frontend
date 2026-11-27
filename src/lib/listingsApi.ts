@@ -369,7 +369,8 @@ export const adOrdersApi = {
 };
 
 export const socialApi = {
-  get: (id: string) => apiGet<SocialData>(`/listings/${e2(id)}/social`),
+  /** `live`: the server copies the latest views from the Reels service first (polled while Fetch runs). */
+  get: (id: string, live = false) => apiGet<SocialData>(`/listings/${e2(id)}/social${live ? "?live=1" : ""}`),
   /** Saves links only (no views read). Only the platforms sent are changed. */
   saveLinks: (id: string, links: Partial<Record<SocialPlatform, string | null>>) => apiSend<SocialData>("PUT", `/listings/${e2(id)}/social/links`, links),
   /** Saves the links and reads their views (can take a minute or two). */

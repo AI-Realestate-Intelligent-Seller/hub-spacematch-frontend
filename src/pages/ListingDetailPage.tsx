@@ -1,7 +1,7 @@
 // Plan card and Zillow/Reel status still read the old backend (later slices of Wave 3).
 import { useAction } from "convex/react";
 import { ArrowLeft, Check, ChevronDown, ClipboardPaste, Clapperboard, Copy, ExternalLink, Eye, EyeOff, FileBarChart, Mail, MailPlus, MessageSquare, RefreshCw, Send, Trash2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 import { toast } from "sonner";
 import { LAUNCH_STEPS, LISTING_STATUSES } from "../../convex/launchSteps";
@@ -10,7 +10,7 @@ import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { FieldError, StatusChip, ago, errMsg, fieldCls, inputCls } from "./ListingsPage";
 import { centsToPrice, check, detailsSchema, digitsOnly, eventSchema, orNull, priceToCents, rules, suggestionSchema, typeName, typePhone, typePrice } from "@/lib/listingForms";
-import { fieldErrors, type Listing, type ListingEvent, type ListingMetric, listingsApi, type SocialPlatform, socialApi, supportsLegacyListing, useListingsData } from "@/lib/listingsApi";
+import { fieldErrors, type Listing, type ListingEvent, type ListingMetric, listingsApi, type SocialPlatform, type SocialStat, socialApi, supportsLegacyListing, useListingsData } from "@/lib/listingsApi";
 import { formatFreeAddress, formatPrice } from "../../convex/address";
 import { AgentAdCampaigns } from "../components/hub/AdCampaigns";
 import { ListingAdOrder } from "../components/hub/AdOrder";
@@ -19,7 +19,7 @@ import { CmaListingButton } from "@/components/cma/CmaListingButton";
 import { EmptyState, LoadError, Skeleton } from "@/components/hub/FormState";
 import { Skeleton as Placeholder } from "@/components/ui/skeleton";
 import { api as backendApi } from "@/lib/api";
-import { useApiData } from "@/lib/apiData";
+import { notifyDataChanged, useApiData } from "@/lib/apiData";
 import { useLegacyQuery } from "@/auth/convexClient";
 
 type Tab = "steps" | "numbers" | "next" | "ads" | "activity" | "details";
@@ -204,12 +204,41 @@ const checkSocialLink = (p: (typeof PLATFORMS)[number], v: string) => {
 };
 const compact = (n?: number) => (n == null ? "N/A" : n >= 1e6 ? `${(n / 1e6).toFixed(1).replace(/\.0$/, "")}M` : n >= 1e4 ? `${(n / 1e3).toFixed(1).replace(/\.0$/, "")}K` : n.toLocaleString());
 
+/** Identifies one read of one link: changes when the link is read again (or replaced). */
+const readSig = (s?: SocialStat) => `${s?.url ?? ""}|${s?.checkedAt ?? ""}`;
+const LIVE_POLL_MS = 2500;
+
 function SocialStats({ l }: { l: Listing }) {
   const { data, error, reload } = useListingsData(`listings:social:${l._id}`, () => socialApi.get(l._id));
   const [links, setLinks] = useState<Record<SocialPlatform, string> | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  // While Fetch runs: each platform's read as it was when Fetch was tapped. A platform whose read differs
+  // from this has been read again and shows its new number straight away; the rest show "Reading…".
+  const [before, setBefore] = useState<Partial<Record<SocialPlatform, string>> | null>(null);
+  const lastSeen = useRef("");
+  useEffect(() => {
+    if (!busy) return;
+    let stop = false;
+    const tick = async () => {
+      try {
+        const fresh = await socialApi.get(l._id, true);
+        const sig = fresh.stats.map(s => `${readSig(s)}|${s.views ?? ""}`).join(",");
+        if (!stop && sig !== lastSeen.current) {
+          lastSeen.current = sig;
+          notifyDataChanged(); // this card and the weekly numbers below pick up the new views
+        }
+      } catch {
+        /* the next tick tries again; Fetch itself reports errors */
+      }
+    };
+    const timer = window.setInterval(() => void tick(), LIVE_POLL_MS);
+    return () => {
+      stop = true;
+      window.clearInterval(timer);
+    };
+  }, [busy, l._id]);
   // Start from the saved links (the Instagram one is the Reel link from Details).
   useEffect(() => {
     if (data && links === null) setLinks({ instagram: data.links.instagram ?? "", youtube: data.links.youtube ?? "", tiktok: data.links.tiktok ?? "", facebook: data.links.facebook ?? "" });
@@ -241,6 +270,8 @@ function SocialStats({ l }: { l: Listing }) {
     setErrors(errs);
     if (Object.keys(errs).length) return;
     if (!PLATFORMS.some(p => v[p.key]) && !PLATFORMS.some(p => data.links[p.key])) return toast.error("Add at least one video link first.");
+    setBefore(Object.fromEntries(data.stats.map(s => [s.platform, readSig(s)])));
+    lastSeen.current = data.stats.map(s => `${readSig(s)}|${s.views ?? ""}`).join(",");
     setBusy(true);
     setNotice(null);
     try {
@@ -253,9 +284,12 @@ function SocialStats({ l }: { l: Listing }) {
       toast.error(errMsg(e));
     } finally {
       setBusy(false);
+      setBefore(null);
     }
   };
   const stat = (k: SocialPlatform) => data.stats.find(s => s.platform === k);
+  /** True while Fetch runs and this platform's link hasn't been read in this Fetch yet. */
+  const reading = (k: SocialPlatform) => busy && !!v[k] && (!stat(k)?.checkedAt || readSig(stat(k)) === before?.[k]);
   return (
     <section className="rounded-2xl bg-white p-4 ring-1 ring-black/5" data-testid="social-stats">
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -271,6 +305,7 @@ function SocialStats({ l }: { l: Listing }) {
       <div className="mt-3 space-y-3">
         {PLATFORMS.map(p => {
           const st = stat(p.key);
+          const wait = reading(p.key);
           return (
             <div key={p.key} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_150px] sm:items-start">
               <label className="block text-sm font-medium text-stone-700">{p.label}{p.key === "instagram" && <span className="font-normal text-stone-400"> · same as Instagram Reel in Details</span>}
@@ -278,9 +313,9 @@ function SocialStats({ l }: { l: Listing }) {
                 <FieldError msg={errors[p.key]} />
               </label>
               <div className="rounded-xl bg-stone-50 px-3 py-2 sm:mt-5" aria-live="polite">
-                <div className="font-display text-xl leading-none text-[#0A0A0A]">{st?.url ? compact(st.views) : "–"}</div>
+                <div className={`font-display text-xl leading-none ${wait ? "text-stone-400" : "text-[#0A0A0A]"}`}>{st?.url && (!wait || st.views != null) ? compact(st.views) : "–"}</div>
                 <div className="mt-1 text-[11px] text-stone-500">
-                  {!st?.url ? "views" : st.status === "invalid" ? <span className="text-red-600">Link no longer available</span> : st.status === "stale" ? <span className="text-amber-700" title={st.error}>Couldn't update · showing last</span> : st.okAt ? `views · as of ${ago(st.okAt)}` : "Fetching…"}
+                  {wait ? <span className="inline-flex items-center gap-1 text-[#7A5A25]"><RefreshCw className="size-3 animate-spin" /> Reading…</span> : !st?.url ? "views" : st.status === "invalid" ? <span className="text-red-600">Link no longer available</span> : st.status === "stale" ? <span className="text-amber-700" title={st.error}>Couldn't update · showing last</span> : st.okAt ? `views · as of ${ago(st.okAt)}` : "Fetching…"}
                 </div>
               </div>
             </div>
@@ -289,7 +324,7 @@ function SocialStats({ l }: { l: Listing }) {
       </div>
       {notice && <p className="mt-3 text-sm text-stone-600">{notice}</p>}
       <button type="button" onClick={fetchNow} disabled={busy || !data.connected} className="mt-4 inline-flex items-center gap-2 rounded-xl bg-[#9C7434] px-5 py-2.5 text-sm font-semibold text-white disabled:opacity-50">
-        {busy ? <><RefreshCw className="size-4 animate-spin" /> Fetching… this can take a minute</> : <><RefreshCw className="size-4" /> Fetch views</>}
+        {busy ? <><RefreshCw className="size-4 animate-spin" /> Fetching… each number shows as soon as it's read</> : <><RefreshCw className="size-4" /> Fetch views</>}
       </button>
     </section>
   );
