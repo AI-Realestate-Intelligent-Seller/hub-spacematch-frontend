@@ -56,11 +56,16 @@ export function useApiData<T>(key: string | null, fetcher: () => Promise<T>, opt
   const [state, setState] = useState<{ key: string | null; data?: T; error?: ApiError | Error }>({ key: null });
   const fetchRef = useRef(fetcher);
   const requestRef = useRef(0);
+  // Requests still waiting for an answer. Timed polls skip while one is out: when the server answers slower
+  // than `pollMs`, each poll used to supersede the previous one, so no answer was ever shown (a CMA stuck
+  // on "Identifying parcel" while requests piled up).
+  const inFlightRef = useRef(0);
   fetchRef.current = fetcher;
 
   const load = useCallback(async () => {
     if (key === null) return;
     const request = ++requestRef.current;
+    inFlightRef.current++;
     try {
       const data = await fetchRef.current();
       if (request === requestRef.current) setState({ key, data });
@@ -68,6 +73,8 @@ export function useApiData<T>(key: string | null, fetcher: () => Promise<T>, opt
       if (request === requestRef.current) {
         setState(s => ({ key, data: s.key === key ? s.data : undefined, error: e as Error }));
       }
+    } finally {
+      inFlightRef.current--;
     }
   }, [key]);
 
@@ -80,9 +87,10 @@ export function useApiData<T>(key: string | null, fetcher: () => Promise<T>, opt
     if (key === null) return;
     void load();
     listeners.add(load);
-    const onFocus = () => document.visibilityState === "visible" && void load();
+    const idle = () => document.visibilityState === "visible" && inFlightRef.current === 0;
+    const onFocus = () => idle() && void load();
     document.addEventListener("visibilitychange", onFocus);
-    const timer = opts.pollMs ? window.setInterval(() => document.visibilityState === "visible" && void load(), opts.pollMs) : undefined;
+    const timer = opts.pollMs ? window.setInterval(() => idle() && void load(), opts.pollMs) : undefined;
     return () => {
       requestRef.current++;
       listeners.delete(load);
